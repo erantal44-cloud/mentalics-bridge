@@ -334,4 +334,4 @@ server.listen(PORT, () => {
   console.log(`שרת הגישור של מנטליקס פעיל על פורט ${PORT}`);
 });
 
-module.exports = { buildReport, israelDateParts, isoDateOnly,
+module.exports = { buildReport, israelDateParts, isoDateOnly, hourOf };
