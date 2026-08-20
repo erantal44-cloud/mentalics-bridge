@@ -176,12 +176,15 @@ async function fetchRapidAppointments(fromISO, toISO) {
 
   const contentType = resp.headers.get('content-type') || '';
   if (!contentType.includes('application/json')) {
+    const textPreview = (await resp.text()).slice(0, 300);
+    console.error(`[fetchRapidAppointments] תשובה לא-JSON (סטטוס ${resp.status}): ${textPreview}`);
     const err = new Error('COOKIE_EXPIRED_OR_INVALID');
     err.code = 'COOKIE_EXPIRED_OR_INVALID';
     throw err;
   }
   const data = await resp.json();
   if (!Array.isArray(data)) {
+    console.error(`[fetchRapidAppointments] תשובת JSON לא-מערך (סטטוס ${resp.status}): ${JSON.stringify(data).slice(0, 500)}`);
     const err = new Error('UNEXPECTED_RESPONSE_SHAPE');
     err.code = 'UNEXPECTED_RESPONSE_SHAPE';
     throw err;
@@ -281,7 +284,13 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (pathname === '/health' && req.method === 'GET') {
-      return sendJson(res, 200, { ok: true, hasCookie: !!state.cookie, cookieSavedAt: state.savedAt });
+      return sendJson(res, 200, {
+        ok: true,
+        hasCookie: !!state.cookie,
+        cookieSavedAt: state.savedAt,
+        cookieLength: state.cookie ? state.cookie.length : 0,
+        cookiePreview: state.cookie ? `${state.cookie.slice(0, 12)}...${state.cookie.slice(-12)}` : null,
+      });
     }
 
     if (pathname === '/report' && req.method === 'GET') {
