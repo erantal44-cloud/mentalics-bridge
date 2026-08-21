@@ -2,7 +2,8 @@
 // נכתב ב-Node.js טהור (בלי תלות בחבילות חיצוניות) כדי שיהיה קל לבדוק ולפרוס.
 //
 // מה הוא עושה:
-// 1. שומר עוגיית session עדכנית (.AspNet.Cookies) שמודבקת ידנית פעם ביום/כמה ימים דרך /admin
+// 1. שומר "חתימת בקשה" עדכנית (כל הכותרות שרפיד וואן דורש - כולל Cookie ו-Authorization)
+//    שמודבקת ידנית פעם ביום/כמה ימים דרך /admin (העתקה מלאה כ-cURL מ-DevTools)
 // 2. מספק endpoint (/report) שמביא מרפיד וואן את כל הפגישות בטווח תאריכים רלוונטי,
 //    ומחזיר סיכום מובנה (JSON): לו"ז היום לפי רופא, בדיקת גבייה לרופא שעבד אתמול בערב,
 //    וספירת פגישות ליומיים הקרובים (לבדיקת "חורים" גסה).
@@ -27,14 +28,14 @@ if (!ADMIN_SECRET) {
   process.exit(1);
 }
 
-// --- אחסון פשוט של העוגייה (best-effort - בדיסק המקומי) ---
+// --- אחסון פשוט של כותרות הבקשה (best-effort - בדיסק המקומי) ---
 // הערה: בתוכנית החינמית של Render הדיסק לא בהכרח נשמר בין הפעלות מחדש.
-// אם זה קורה בפועל, פשוט צריך להדביק את העוגייה מחדש דרך /admin.
+// אם זה קורה בפועל, פשוט צריך להדביק מחדש דרך /admin.
 function loadState() {
   try {
     return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
   } catch {
-    return { cookie: null, savedAt: null };
+    return { headers: null, savedAt: null };
   }
 }
 function saveState(newState) {
@@ -73,9 +74,35 @@ function parseFormBody(raw) {
   return obj;
 }
 
-// --- עמוד הדבקת עוגייה ---
+// --- חילוץ כותרות מתוך טקסט "Copy as cURL (bash)" של Chrome DevTools ---
+function parseCurlHeaders(curlText) {
+  const headers = {};
+  const hRegex = /--?H(?:eader)?\s+(['"])([^:]+):\s*([\s\S]*?)\1/g;
+  let m;
+  while ((m = hRegex.exec(curlText)) !== null) {
+    const name = m[2].trim().toLowerCase();
+    headers[name] = m[3];
+  }
+  const cRegex = /(?:-b|--cookie)\s+(['"])([\s\S]*?)\1/;
+  const cMatch = curlText.match(cRegex);
+  if (cMatch) {
+    headers['cookie'] = cMatch[2];
+  }
+  // כותרות שאסור להעביר הלאה כמו שהן (יחושבו מחדש או לא רלוונטיות)
+  delete headers['content-length'];
+  delete headers['host'];
+  delete headers[':authority'];
+  delete headers[':method'];
+  delete headers[':path'];
+  delete headers[':scheme'];
+  return headers;
+}
+
+// --- עמוד הדבקת חתימת בקשה ---
 function adminPageHtml(key) {
   const savedAt = state.savedAt ? new Date(state.savedAt).toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem' }) : 'אף פעם';
+  const hasCookie = !!(state.headers && state.headers.cookie);
+  const hasAuth = !!(state.headers && state.headers.authorization);
   return `<!doctype html>
 <html dir="rtl" lang="he">
 <head>
@@ -86,25 +113,29 @@ function adminPageHtml(key) {
     body { font-family: system-ui, sans-serif; max-width: 640px; margin: 40px auto; padding: 0 16px; line-height: 1.6; color: #222; }
     h1 { font-size: 20px; }
     ol { padding-right: 20px; }
-    textarea { width: 100%; min-height: 100px; font-family: monospace; font-size: 13px; box-sizing: border-box; padding: 8px; }
+    textarea { width: 100%; min-height: 160px; font-family: monospace; font-size: 12px; box-sizing: border-box; padding: 8px; direction: ltr; text-align: left; }
     button { background: #2563eb; color: white; border: none; padding: 10px 20px; border-radius: 6px; font-size: 15px; cursor: pointer; margin-top: 12px; }
     .status { background: #f1f5f9; padding: 10px 14px; border-radius: 6px; margin-bottom: 20px; font-size: 14px; }
+    code { background: #f1f5f9; padding: 1px 5px; border-radius: 4px; }
   </style>
 </head>
 <body>
   <h1>עדכון חיבור לרפיד וואן - מנטליקס</h1>
-  <div class="status">עוגייה שמורה כרגע מתאריך: <b>${savedAt}</b></div>
+  <div class="status">
+    נשמר לאחרונה: <b>${savedAt}</b><br>
+    Cookie: ${hasCookie ? '✔ קיים' : '✘ חסר'} | Authorization: ${hasAuth ? '✔ קיים' : '✘ חסר'}
+  </div>
   <ol>
     <li>היכנס ל-<code>mentalics.rapid-image.net/schedule</code> והתחבר כרגיל (כולל קוד ה-SMS).</li>
     <li>פתח את כלי המפתחים של הדפדפן (F12) ← לשונית <b>Network</b>.</li>
     <li>סנן לפי <code>appointments</code>, ורענן את הדף אם צריך שתופיע בקשה.</li>
-    <li>לחץ על הבקשה ← לשונית <b>Headers</b> ← תחת <b>Request Headers</b> מצא את השורה <code>Cookie:</code>.</li>
-    <li>העתק את הערך המלא שאחרי <code>Cookie:</code> (המחרוזת הארוכה) והדבק אותו כאן למטה.</li>
+    <li>קליק ימני על הבקשה ← <b>Copy</b> ← <b>Copy as cURL (bash)</b>.</li>
+    <li>הדבק כאן למטה את <b>כל הטקסט</b> שהועתק (מתחיל במילה <code>curl</code>) ולחץ שמור.</li>
   </ol>
   <form method="POST" action="/admin/cookie?key=${encodeURIComponent(key)}">
-    <textarea name="cookie" placeholder="הדבק כאן את ערך ה-Cookie המלא..." required></textarea>
+    <textarea name="curl" placeholder="curl --url '...' -H '...' ..." required></textarea>
     <br>
-    <button type="submit">שמור עוגייה</button>
+    <button type="submit">שמור</button>
   </form>
 </body>
 </html>`;
@@ -128,17 +159,54 @@ function hourOf(dateStr) {
   return t ? Number(t) : null;
 }
 
+// חישוב הפרש השעות של אזור הזמן של ישראל (מתחשב אוטומטית בשעון קיץ/חורף)
+function israelOffsetMinutes(atDate) {
+  try {
+    const dtf = new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Jerusalem', timeZoneName: 'shortOffset' });
+    const parts = dtf.formatToParts(atDate);
+    const tzPart = parts.find((p) => p.type === 'timeZoneName');
+    const match = tzPart && tzPart.value.match(/GMT([+-]\d+)(?::?(\d+))?/);
+    if (!match) return 180;
+    const hours = parseInt(match[1], 10);
+    const mins = match[2] ? parseInt(match[2], 10) : 0;
+    return hours * 60 + (hours < 0 ? -mins : mins);
+  } catch {
+    return 180; // ברירת מחדל - שעון קיץ ישראל (UTC+3)
+  }
+}
+// הרגע המדויק (UTC) של חצות בישראל עבור תאריך נתון (YYYY-MM-DD)
+function israelMidnightUtcDate(isoDateStr) {
+  const guessUtcMidnight = new Date(`${isoDateStr}T00:00:00Z`);
+  const offsetMin = israelOffsetMinutes(guessUtcMidnight);
+  return new Date(guessUtcMidnight.getTime() - offsetMin * 60000);
+}
+
 // --- קריאה בפועל לרפיד וואן ---
-async function fetchRapidAppointments(fromISO, toISO) {
+async function fetchRapidAppointments(fromDateOnly, toExclusiveDateOnly) {
+  if (!state.headers || (!state.headers.cookie && !state.headers.authorization)) {
+    const err = new Error('NO_AUTH_SAVED');
+    err.code = 'NO_AUTH_SAVED';
+    throw err;
+  }
+
+  const fromDate = israelMidnightUtcDate(fromDateOnly);
+  const toDate = israelMidnightUtcDate(toExclusiveDateOnly);
+
   const url = new URL(`${RAPID_BASE_URL}/api/schedule/appointments`);
-  url.searchParams.set('from', `${fromISO}T00:00:00`);
-  url.searchParams.set('to', `${toISO}T23:59:59`);
+  url.searchParams.set('from', fromDate.toUTCString());
+  url.searchParams.set('to', toDate.toUTCString());
   url.searchParams.set('departmentId', DEPARTMENT_ID);
   url.searchParams.set('showDebtIndicator', 'true');
   url.searchParams.set('skipApptAdditionalInfo', 'false');
   url.searchParams.set('showAppointmentOfAllDepartment', 'true');
   url.searchParams.set('applyCache', 'false');
   url.searchParams.set('foreignNames', 'false');
+
+  const headers = { ...state.headers };
+  if (!headers['content-type']) headers['content-type'] = 'application/json;charset=UTF-8';
+  if (!headers['accept']) headers['accept'] = 'application/json, text/plain, */*';
+  if (!headers['referer']) headers['referer'] = `${RAPID_BASE_URL}/schedule`;
+  if (!headers['origin']) headers['origin'] = RAPID_BASE_URL;
 
   const controller = new AbortController();
   const timeoutMs = Number(process.env.RAPID_TIMEOUT_MS || 20000);
@@ -149,14 +217,8 @@ async function fetchRapidAppointments(fromISO, toISO) {
   try {
     resp = await fetch(url.toString(), {
       method: 'POST',
-      headers: {
-        Cookie: state.cookie || '',
-        'Content-Type': 'application/json',
-        Accept: 'application/json, text/plain, */*',
-        Referer: `${RAPID_BASE_URL}/schedule`,
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
-      },
-      body: JSON.stringify({}),
+      headers,
+      body: '[]',
       signal: controller.signal,
     });
   } catch (fetchErr) {
@@ -185,6 +247,11 @@ async function fetchRapidAppointments(fromISO, toISO) {
   const data = await resp.json();
   if (!Array.isArray(data)) {
     console.error(`[fetchRapidAppointments] תשובת JSON לא-מערך (סטטוס ${resp.status}): ${JSON.stringify(data).slice(0, 500)}`);
+    if (resp.status === 401 || resp.status === 403) {
+      const err = new Error('COOKIE_EXPIRED_OR_INVALID');
+      err.code = 'COOKIE_EXPIRED_OR_INVALID';
+      throw err;
+    }
     const err = new Error('UNEXPECTED_RESPONSE_SHAPE');
     err.code = 'UNEXPECTED_RESPONSE_SHAPE';
     throw err;
@@ -269,15 +336,23 @@ const server = http.createServer(async (req, res) => {
       if (!checkSecret(key)) return sendHtml(res, 403, 'גישה נדחתה - סוד שגוי או חסר.');
       const raw = await readBody(req);
       const body = parseFormBody(raw);
-      const cookie = (body.cookie || '').trim();
-      if (!cookie) return sendHtml(res, 400, 'לא התקבל ערך עוגייה.');
-      state = { cookie, savedAt: new Date().toISOString() };
+      const curlText = (body.curl || '').trim();
+      if (!curlText) return sendHtml(res, 400, 'לא התקבל טקסט.');
+      const headers = parseCurlHeaders(curlText);
+      if (!headers.cookie && !headers.authorization) {
+        return sendHtml(
+          res,
+          400,
+          'לא נמצאו בטקסט לא כותרת Cookie ולא כותרת Authorization. ודא שהדבקת את כל הפלט של "Copy as cURL" (מתחיל במילה curl).'
+        );
+      }
+      state = { headers, savedAt: new Date().toISOString() };
       saveState(state);
       return sendHtml(
         res,
         200,
         `<!doctype html><html dir="rtl" lang="he"><body style="font-family:system-ui;max-width:640px;margin:40px auto;padding:0 16px;">
-          <p style="background:#dcfce7;color:#166534;padding:14px;border-radius:6px;">✔ העוגייה נשמרה בהצלחה.</p>
+          <p style="background:#dcfce7;color:#166534;padding:14px;border-radius:6px;">✔ נשמר בהצלחה (Cookie: ${headers.cookie ? 'כן' : 'לא'}, Authorization: ${headers.authorization ? 'כן' : 'לא'}).</p>
           <a href="/admin?key=${encodeURIComponent(key)}">חזרה</a>
         </body></html>`
       );
@@ -286,34 +361,38 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/health' && req.method === 'GET') {
       return sendJson(res, 200, {
         ok: true,
-        hasCookie: !!state.cookie,
-        cookieSavedAt: state.savedAt,
-        cookieLength: state.cookie ? state.cookie.length : 0,
-        cookiePreview: state.cookie ? `${state.cookie.slice(0, 12)}...${state.cookie.slice(-12)}` : null,
+        hasCookie: !!(state.headers && state.headers.cookie),
+        hasAuthorization: !!(state.headers && state.headers.authorization),
+        savedAt: state.savedAt,
+        headerNames: state.headers ? Object.keys(state.headers) : [],
       });
     }
 
     if (pathname === '/report' && req.method === 'GET') {
       const key = url.searchParams.get('key');
       if (!checkSecret(key)) return sendJson(res, 403, { error: 'FORBIDDEN' });
-      if (!state.cookie) {
-        return sendJson(res, 409, { error: 'NO_COOKIE_SAVED', message: 'לא נשמרה עדיין עוגייה. יש להיכנס ל-/admin ולהדביק אחת.' });
+      if (!state.headers) {
+        return sendJson(res, 409, { error: 'NO_AUTH_SAVED', message: 'לא נשמרה עדיין חתימת בקשה. יש להיכנס ל-/admin ולהדביק cURL טרי.' });
       }
 
       const today = url.searchParams.get('date') || israelDateParts(0).iso;
       const yesterday = israelDateParts(-1).iso;
       const dayPlus1 = israelDateParts(1).iso;
       const dayPlus2 = israelDateParts(2).iso;
+      const dayPlus3 = israelDateParts(3).iso; // גבול עליון לא כולל, לטווח השאילתה בפועל
 
       let appointments;
       try {
-        appointments = await fetchRapidAppointments(yesterday, dayPlus2);
+        appointments = await fetchRapidAppointments(yesterday, dayPlus3);
       } catch (err) {
         console.error(`[/report] שגיאה: ${err.code || 'UNKNOWN'} - ${err.message}`);
+        if (err.code === 'NO_AUTH_SAVED') {
+          return sendJson(res, 409, { error: 'NO_AUTH_SAVED', message: 'לא נשמרה עדיין חתימת בקשה. יש להיכנס ל-/admin ולהדביק cURL טרי.' });
+        }
         if (err.code === 'COOKIE_EXPIRED_OR_INVALID') {
           return sendJson(res, 401, {
             error: 'COOKIE_EXPIRED_OR_INVALID',
-            message: 'העוגייה פגה או לא תקפה. יש להתחבר מחדש לרפיד וואן ולהדביק עוגייה טרייה דרך /admin.',
+            message: 'החיבור פג או לא תקף. יש להתחבר מחדש לרפיד וואן ולהדביק cURL טרי דרך /admin.',
           });
         }
         if (err.code === 'RAPID_TIMEOUT') {
@@ -343,4 +422,4 @@ server.listen(PORT, () => {
   console.log(`שרת הגישור של מנטליקס פעיל על פורט ${PORT}`);
 });
 
-module.exports = { buildReport, israelDateParts, isoDateOnly, hourOf };
+module.exports = { buildReport, israelDateParts, isoDateOnly, hourOf, parseCurlHeaders, israelMidnightUtcDate };
