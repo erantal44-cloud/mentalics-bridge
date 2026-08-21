@@ -368,6 +368,28 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
+    if (pathname === '/debug/evening' && req.method === 'GET') {
+      // נתיב זמני לאבחון: מחזיר את הפגישות הגולמיות (כל השדות) של אתמול בערב,
+      // כדי לבדוק אילו שדות רפיד וואן מחזירה לגבי מטפל/סוג שירות.
+      const key = url.searchParams.get('key');
+      if (!checkSecret(key)) return sendJson(res, 403, { error: 'FORBIDDEN' });
+      const yesterday = israelDateParts(-1).iso;
+      const dayPlus3 = israelDateParts(3).iso;
+      let appointments;
+      try {
+        appointments = await fetchRapidAppointments(yesterday, dayPlus3);
+      } catch (err) {
+        return sendJson(res, 502, { error: err.code || 'UNKNOWN', message: err.message });
+      }
+      const evening = appointments.filter((appt) => {
+        if (appt.isDeleted) return false;
+        const dateOnly = isoDateOnly(appt.startDate);
+        const h = hourOf(appt.startDate);
+        return dateOnly === yesterday && h !== null && h >= EVENING_CUTOFF_HOUR;
+      });
+      return sendJson(res, 200, evening);
+    }
+
     if (pathname === '/report' && req.method === 'GET') {
       const key = url.searchParams.get('key');
       if (!checkSecret(key)) return sendJson(res, 403, { error: 'FORBIDDEN' });
