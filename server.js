@@ -259,24 +259,51 @@ async function fetchRapidAppointments(fromDateOnly, toExclusiveDateOnly) {
   return data;
 }
 
+// --- זיהוי המטפל/ה וסוג השירות בפועל ---
+// שדה doctorName לפעמים ריק (במיוחד אצל פסיכולוגים) - staffNames הוא המקור האמין יותר.
+function getStaffName(appt) {
+  if (Array.isArray(appt.staffNames) && appt.staffNames.length) {
+    return appt.staffNames.join(', ');
+  }
+  if (appt.doctorName) return appt.doctorName;
+  return 'לא ידוע';
+}
+// שם השירות/הטיפול בפועל (אם קיים) - למשל "מעקב פסיכיאטרי מבוגרים (יעוץ)" או "טיפול פסיכולוגי"
+function getServiceName(appt) {
+  if (appt.firstSrvName) return appt.firstSrvName;
+  if (Array.isArray(appt.services) && appt.services.length && appt.services[0].serviceName) {
+    return appt.services[0].serviceName;
+  }
+  return null;
+}
+// זיהוי טיפול פסיכולוגי (בניגוד לפסיכיאטרי) - כדי לסנן אותו מבדיקת הגבייה היומית
+function isPsychologicalTreatment(appt) {
+  const group = appt.scheduleGroupName || '';
+  const service = getServiceName(appt) || '';
+  return group.includes('פסיכולוג') || service.includes('פסיכולוגי');
+}
+
 // --- בניית הדוח (הלוגיקה העסקית - ניתנת לבדיקה בנפרד) ---
 function buildReport(appointments, { today, yesterday, dayPlus1, dayPlus2 }) {
   const todaySchedule = {};
   const eveningBillingCheck = [];
   const upcomingCounts = {};
+  let filteredPsychologicalCount = 0;
 
   for (const appt of appointments) {
     if (appt.isDeleted) continue;
     const dateOnly = isoDateOnly(appt.startDate);
-    const doctor = appt.doctorName || 'לא משויך לרופא';
+    const staffName = getStaffName(appt);
+    const serviceName = getServiceName(appt);
 
     if (dateOnly === today) {
-      if (!todaySchedule[doctor]) todaySchedule[doctor] = [];
-      todaySchedule[doctor].push({
+      if (!todaySchedule[staffName]) todaySchedule[staffName] = [];
+      todaySchedule[staffName].push({
         time: (appt.startDate || '').slice(11, 16),
         endTime: (appt.endDate || '').slice(11, 16),
         customerName: appt.customerName || '',
         status: appt.bookingStatusName || '',
+        service: serviceName,
         notes: appt.notes || '',
       });
     }
@@ -284,29 +311,34 @@ function buildReport(appointments, { today, yesterday, dayPlus1, dayPlus2 }) {
     if (dateOnly === yesterday) {
       const h = hourOf(appt.startDate);
       if (h !== null && h >= EVENING_CUTOFF_HOUR) {
-        const balance = typeof appt.patientBalance === 'number' ? appt.patientBalance : null;
-        const needsAttention = appt.isPaid === false || appt.hasInvoice === false || (balance !== null && balance < 0);
-        eveningBillingCheck.push({
-          doctor,
-          time: (appt.startDate || '').slice(11, 16),
-          customerName: appt.customerName || '',
-          isPaid: appt.isPaid,
-          hasInvoice: appt.hasInvoice,
-          patientBalance: balance,
-          price: appt.price,
-          needsAttention,
-        });
+        if (isPsychologicalTreatment(appt)) {
+          filteredPsychologicalCount += 1;
+        } else {
+          const balance = typeof appt.patientBalance === 'number' ? appt.patientBalance : null;
+          const needsAttention = appt.isPaid === false || appt.hasInvoice === false || (balance !== null && balance < 0);
+          eveningBillingCheck.push({
+            staffName,
+            service: serviceName,
+            time: (appt.startDate || '').slice(11, 16),
+            customerName: appt.customerName || '',
+            isPaid: appt.isPaid,
+            hasInvoice: appt.hasInvoice,
+            patientBalance: balance,
+            price: appt.price,
+            needsAttention,
+          });
+        }
       }
     }
 
     if (dateOnly === dayPlus1 || dateOnly === dayPlus2) {
       if (!upcomingCounts[dateOnly]) upcomingCounts[dateOnly] = {};
-      upcomingCounts[dateOnly][doctor] = (upcomingCounts[dateOnly][doctor] || 0) + 1;
+      upcomingCounts[dateOnly][staffName] = (upcomingCounts[dateOnly][staffName] || 0) + 1;
     }
   }
 
-  for (const doctor of Object.keys(todaySchedule)) {
-    todaySchedule[doctor].sort((a, b) => a.time.localeCompare(b.time));
+  for (const staffName of Object.keys(todaySchedule)) {
+    todaySchedule[staffName].sort((a, b) => a.time.localeCompare(b.time));
   }
 
   return {
@@ -314,8 +346,9 @@ function buildReport(appointments, { today, yesterday, dayPlus1, dayPlus2 }) {
     dates: { yesterday, today, dayPlus1, dayPlus2 },
     todaySchedule,
     eveningBillingCheck,
+    filteredPsychologicalCount,
     upcomingCounts,
-    note: 'upcomingCounts היא ספירה גולמית של פגישות קיימות בלבד - לא בדיקת "חורים" אמיתית מול שעות עבודה מלאות של כל רופא.',
+    note: 'upcomingCounts היא ספירה גולמית של פגישות קיימות בלבד - לא בדיקת "חורים" אמיתית מול שעות עבודה מלאות של כל רופא. eveningBillingCheck כולל רק טיפולים פסיכיאטריים (לא פסיכולוגיים) - ראה filteredPsychologicalCount למספר שסוננו.',
   };
 }
 
@@ -444,4 +477,14 @@ server.listen(PORT, () => {
   console.log(`שרת הגישור של מנטליקס פעיל על פורט ${PORT}`);
 });
 
-module.exports = { buildReport, israelDateParts, isoDateOnly, hourOf, parseCurlHeaders, israelMidnightUtcDate };
+module.exports = {
+  buildReport,
+  israelDateParts,
+  isoDateOnly,
+  hourOf,
+  parseCurlHeaders,
+  israelMidnightUtcDate,
+  getStaffName,
+  getServiceName,
+  isPsychologicalTreatment,
+};
