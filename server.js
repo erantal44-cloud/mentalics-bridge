@@ -4,9 +4,9 @@
 // מה הוא עושה:
 // 1. שומר "חתימת בקשה" עדכנית (כל הכותרות שרפיד וואן דורש - כולל Cookie ו-Authorization)
 //    שמודבקת ידנית פעם ביום/כמה ימים דרך /admin (העתקה מלאה כ-cURL מ-DevTools)
-// 2. מספק endpoint (/report) שמביא מרפיד וואן את כל הפגישות בטווח תאריכים רלוונטי,
-//    ומחזיר סיכום מובנה (JSON): לו"ז היום לפי רופא, בדיקת גבייה לרופא שעבד אתמול בערב,
-//    וספירת פגישות ליומיים הקרובים (לבדיקת "חורים" גסה).
+// 2. מספק endpoint (/raw) שמחזיר פגישות גולמיות לטווח תאריכים - כל ההיגיון העסקי
+//    (סינון, כללים) מתבצע בצד השיחה עם קלוד, לא בקוד עצמו.
+// 3. מספק גם /report - סיכום מובנה בסיסי (לו"ז היום, בדיקת גבייה, ספירת פגישות קרובות).
 //
 // הערה חשובה: זה endpoint פנימי לא-רשמי של רפיד וואן (לא ה-Public API המתועד).
 // הוא יכול להשתנות או להישבר בכל עדכון של רפיד בלי אזהרה מראש.
@@ -401,26 +401,23 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
-    if (pathname === '/debug/evening' && req.method === 'GET') {
-      // נתיב זמני לאבחון: מחזיר את הפגישות הגולמיות (כל השדות) של אתמול בערב,
-      // כדי לבדוק אילו שדות רפיד וואן מחזירה לגבי מטפל/סוג שירות.
+    if (pathname === '/raw' && req.method === 'GET') {
+      // נתיב כללי: מחזיר פגישות גולמיות (כל השדות, כמו שרפיד וואן מחזירה) לטווח תאריכים.
+      // כל הסינון/ההיגיון העסקי (מי רלוונטי, אילו כללים חלים) מתבצע בצד השיחה, לא כאן.
+      // from/to הם תאריכי יומן ישראל (YYYY-MM-DD); to הוא לא כולל (חצות ישראל של אותו תאריך).
+      // ברירת מחדל: מאתמול ועד 7 ימים קדימה - מספיק להסתכל אחורה (גבייה/סיכומים) וקדימה (מיזוג/לו"ז).
       const key = url.searchParams.get('key');
       if (!checkSecret(key)) return sendJson(res, 403, { error: 'FORBIDDEN' });
-      const yesterday = israelDateParts(-1).iso;
-      const dayPlus3 = israelDateParts(3).iso;
+      const from = url.searchParams.get('from') || israelDateParts(-1).iso;
+      const to = url.searchParams.get('to') || israelDateParts(7).iso;
       let appointments;
       try {
-        appointments = await fetchRapidAppointments(yesterday, dayPlus3);
+        appointments = await fetchRapidAppointments(from, to);
       } catch (err) {
         return sendJson(res, 502, { error: err.code || 'UNKNOWN', message: err.message });
       }
-      const evening = appointments.filter((appt) => {
-        if (appt.isDeleted) return false;
-        const dateOnly = isoDateOnly(appt.startDate);
-        const h = hourOf(appt.startDate);
-        return dateOnly === yesterday && h !== null && h >= EVENING_CUTOFF_HOUR;
-      });
-      return sendJson(res, 200, evening);
+      const filtered = appointments.filter((appt) => !appt.isDeleted);
+      return sendJson(res, 200, { range: { from, to }, count: filtered.length, appointments: filtered });
     }
 
     if (pathname === '/report' && req.method === 'GET') {
