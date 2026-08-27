@@ -288,9 +288,18 @@ function isDoctorStaffName(staffName) {
   const s = (staffName || '').trim();
   return s.startsWith('דר ') || s.startsWith('פרופ');
 }
-// "כללי כללי" הוא סימון פנימי של המכון (לא לקוח/פגישה אמיתיים) - למשל חסימת זמן/חופשה
+// שמות "לקוח" שהם סימונים פנימיים של המכון (לא פגישות אמיתיות) - למשל חסימת זמן/חופשה/זום פרטי
+const PLACEHOLDER_CUSTOMER_NAMES = new Set([
+  'כללי כללי',
+  'ערן כללי',
+  'מחוץ למכון לא לקבוע',
+  'לא לקבוע מחוץ למכון',
+  'לא לקבןע מחוץ למכון',
+  'זום פרטי',
+  'לא במכון',
+]);
 function isPlaceholderBlock(appt) {
-  return (appt.customerName || '').trim() === 'כללי כללי';
+  return PLACEHOLDER_CUSTOMER_NAMES.has((appt.customerName || '').trim());
 }
 
 // --- בניית הדוח (הלוגיקה העסקית - ניתנת לבדיקה בנפרד) ---
