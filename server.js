@@ -21,7 +21,8 @@ const ADMIN_SECRET = process.env.ADMIN_SECRET; // חובה להגדיר - סוד
 const RAPID_BASE_URL = process.env.RAPID_BASE_URL || 'https://mentalics.rapid-image.net';
 const DEPARTMENT_ID = process.env.DEPARTMENT_ID || '1';
 const EVENING_CUTOFF_HOUR = Number(process.env.EVENING_CUTOFF_HOUR || 16);
-const DATA_FILE = path.join(__dirname, 'data.json');
+const DATA_DIR = process.env.DATA_DIR || __dirname;
+const DATA_FILE = path.join(DATA_DIR, 'data.json');
 
 if (!ADMIN_SECRET) {
   console.error('שגיאה: חובה להגדיר את משתנה הסביבה ADMIN_SECRET לפני הפעלת השרת.');
