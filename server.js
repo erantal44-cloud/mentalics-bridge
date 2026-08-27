@@ -160,6 +160,19 @@ function hourOf(dateStr) {
   return t ? Number(t) : null;
 }
 
+// --- שמות ימים בעברית + תווית תאריך, לצורך הודעת הוואטסאפ היומית ---
+const HE_WEEKDAYS = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת'];
+// isoDateStr הוא תמיד תאריך יומן ישראל (YYYY-MM-DD) - מפרשים בצהריים מקומי כדי להימנע מבעיות אזור זמן.
+function weekdayIndexOfIsoDate(isoDateStr) {
+  const d = new Date(`${isoDateStr}T12:00:00`);
+  return d.getDay(); // 0=ראשון ... 6=שבת
+}
+function heDateLabel(isoDateStr) {
+  const idx = weekdayIndexOfIsoDate(isoDateStr);
+  const [y, m, d] = isoDateStr.split('-');
+  return `יום ${HE_WEEKDAYS[idx]}, ${d}.${m}.${y}`;
+}
+
 // חישוב הפרש השעות של אזור הזמן של ישראל (מתחשב אוטומטית בשעון קיץ/חורף)
 function israelOffsetMinutes(atDate) {
   try {
@@ -372,6 +385,129 @@ function buildReport(appointments, { today, yesterday, dayPlus1, dayPlus2 }) {
   };
 }
 
+// --- בניית טקסט הודעת הוואטסאפ היומית מתוך הדוח (report מ-buildReport) + טקסט פניות (מהג'ימייל) ---
+function buildWhatsAppText(report, leadsText) {
+  const { today, dayPlus1 } = report.dates;
+  const todayIdx = weekdayIndexOfIsoDate(today);
+  const lines = [];
+
+  lines.push('📋 דוח בוקר - מכון מנטליקס');
+  lines.push(heDateLabel(today));
+  lines.push('');
+
+  // לו"ז היום - רק רופאים (todaySchedule כבר מסונן ב-buildReport)
+  lines.push('🗓️ לו"ז היום:');
+  const doctorNames = Object.keys(report.todaySchedule).sort();
+  if (doctorNames.length === 0) {
+    lines.push('אין פגישות רופאים היום.');
+  } else {
+    for (const name of doctorNames) {
+      lines.push(`\n${name}:`);
+      for (const appt of report.todaySchedule[name]) {
+        const who = appt.customerName ? appt.customerName : '(חסימה פנימית)';
+        const noteSuffix = appt.notes ? ` - ${appt.notes}` : '';
+        lines.push(`  ${appt.time}-${appt.endTime} ${who}${noteSuffix}`);
+      }
+    }
+  }
+  lines.push('');
+
+  // בדיקת גבייה - אתמול (הודעה כללית לכל רופא, לפי הכלל שסוכם - לא ניחוש פרטים עדינים)
+  lines.push('💳 בדיקת גבייה (אתמול):');
+  const needsAttention = report.eveningBillingCheck.filter((e) => e.needsAttention);
+  if (needsAttention.length === 0) {
+    lines.push('לא נמצאו פגישות הדורשות תשומת לב.');
+  } else {
+    const byDoctor = {};
+    for (const e of needsAttention) {
+      if (!byDoctor[e.staffName]) byDoctor[e.staffName] = [];
+      byDoctor[e.staffName].push(e);
+    }
+    for (const doc of Object.keys(byDoctor)) {
+      lines.push(`שימו לב, אתמול עבד/ה ${doc} - אנא וודאו גבייה:`);
+      for (const e of byDoctor[doc]) {
+        lines.push(`  ${e.time} ${e.customerName || ''}`);
+      }
+    }
+  }
+  lines.push('');
+
+  // מחר - סגור בשבת, או מספר פגישות קבועות לכל רופא
+  const tomorrowIdx = weekdayIndexOfIsoDate(dayPlus1);
+  lines.push(`📆 מחר (${heDateLabel(dayPlus1)}):`);
+  if (tomorrowIdx === 6) {
+    lines.push('המכון סגור (שבת).');
+  } else {
+    const counts = report.upcomingCounts[dayPlus1] || {};
+    const names = Object.keys(counts).sort();
+    if (names.length === 0) {
+      lines.push('אין עדיין פגישות רשומות.');
+    } else {
+      for (const n of names) {
+        lines.push(`  ${n}: ${counts[n]} פגישות קבועות`);
+      }
+    }
+  }
+  lines.push('');
+
+  // סדר יום קבוע למשרד + תזכורת עציצים (שני/חמישי בלבד, מובלטת)
+  lines.push('🧹 סדר יום למשרד:');
+  lines.push('- לרוקן פחים בחדרים.');
+  lines.push('- לסדר את המכון בבוקר.');
+  lines.push('- לבדוק את מצב החלב (יש מספיק? לא מקולקל?).');
+  lines.push('- לרוקן את מגש/מדף החלב במכונת הקפה.');
+  lines.push('- לנקות את השולחן בפינת ההמתנה.');
+  lines.push('- לוודא כי אין לכלוך או עטיפות ממתקים סביב ספת ההמתנה.');
+  if (todayIdx === 1 || todayIdx === 4) {
+    lines.push('');
+    lines.push('🌱🚨 תזכורת חשובה - להשקות את העציצים!! 🚨🌱');
+  }
+  lines.push('');
+
+  // פניות מהלילה (מייל - מגיע כפרמטר leads; וואטסאפ תמיד דורש בדיקה ידנית)
+  lines.push('📞 פניות מהלילה:');
+  lines.push(leadsText && leadsText.trim() ? leadsText.trim() : 'לא התקבל סיכום פניות הפעם.');
+  lines.push('');
+  lines.push('⚠️ מזכיר לכם כי יש פניות גם בטלפון השני, אנא זיכרו לבדוק גם אותו.');
+  lines.push('תזכורת: לבדוק כל שעה אם נכנסו פניות חדשות (מייל/וואטסאפ/טלפון).');
+
+  return lines.join('\n');
+}
+
+// --- שליחת טקסט ההודעה לכל הנמענים דרך שרת הוואטסאפ (server-to-server, בלי מגבלת אורך URL) ---
+async function sendWhatsAppText(text) {
+  const sendUrl = process.env.WHATSAPP_SEND_URL || 'https://mentalics-whatsapp.onrender.com/send';
+  const secret = process.env.WHATSAPP_SECRET;
+  const recipients = (process.env.REPORT_RECIPIENTS || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  if (!secret) throw new Error('MISSING_WHATSAPP_SECRET');
+  if (!recipients.length) throw new Error('MISSING_REPORT_RECIPIENTS');
+
+  const results = [];
+  for (const to of recipients) {
+    try {
+      const resp = await fetch(`${sendUrl}?key=${encodeURIComponent(secret)}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ text, to }),
+      });
+      let body = {};
+      try {
+        body = await resp.json();
+      } catch {
+        // גוף לא-JSON - נשאיר body ריק, נסתמך על resp.ok/status
+      }
+      results.push({ to, ok: resp.ok && body.ok !== false, status: resp.status, body });
+    } catch (err) {
+      results.push({ to, ok: false, error: err.message });
+    }
+  }
+  return results;
+}
+
 // --- שרת HTTP ---
 const server = http.createServer(async (req, res) => {
   try {
@@ -483,6 +619,59 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, report);
     }
 
+    if (pathname === '/daily-send' && req.method === 'GET') {
+      // נתיב לאוטומציה: משימה מתוזמנת קוראת לכאן פעם ביום עם GET קצר (leads=סיכום פניות מהלילה),
+      // והשרת עצמו (שרת-לשרת, לא קלוד) בונה את טקסט הדוח המלא ושולח אותו בוואטסאפ לכל הנמענים.
+      // כך נמנעים לגמרי ממגבלת אורך ה-URL של WebFetch שגילינו קודם.
+      const key = url.searchParams.get('key');
+      if (!checkSecret(key)) return sendJson(res, 403, { error: 'FORBIDDEN' });
+      if (!state.headers) {
+        return sendJson(res, 409, {
+          error: 'NO_AUTH_SAVED',
+          message: 'לא נשמרה עדיין חתימת בקשה לרפיד וואן. יש להיכנס ל-/admin ולהדביק cURL טרי.',
+        });
+      }
+
+      const today = url.searchParams.get('date') || israelDateParts(0).iso;
+      const yesterday = israelDateParts(-1).iso;
+      const dayPlus1 = israelDateParts(1).iso;
+      const dayPlus2 = israelDateParts(2).iso;
+      const dayPlus3 = israelDateParts(3).iso;
+      const leadsText = url.searchParams.get('leads') || '';
+
+      let appointments;
+      try {
+        appointments = await fetchRapidAppointments(yesterday, dayPlus3);
+      } catch (err) {
+        console.error(`[/daily-send] שגיאה בשליפת נתונים מרפיד וואן: ${err.code || 'UNKNOWN'} - ${err.message}`);
+        if (err.code === 'NO_AUTH_SAVED') {
+          return sendJson(res, 409, { error: 'NO_AUTH_SAVED', message: 'לא נשמרה עדיין חתימת בקשה. יש להיכנס ל-/admin ולהדביק cURL טרי.' });
+        }
+        if (err.code === 'COOKIE_EXPIRED_OR_INVALID') {
+          return sendJson(res, 401, {
+            error: 'COOKIE_EXPIRED_OR_INVALID',
+            message: 'החיבור פג או לא תקף. יש להתחבר מחדש לרפיד וואן ולהדביק cURL טרי דרך /admin.',
+          });
+        }
+        return sendJson(res, 502, { error: err.code || 'RAPID_FETCH_FAILED', message: err.message });
+      }
+
+      const report = buildReport(appointments, { today, yesterday, dayPlus1, dayPlus2 });
+      const text = buildWhatsAppText(report, leadsText);
+
+      let sendResults;
+      try {
+        sendResults = await sendWhatsAppText(text);
+      } catch (err) {
+        console.error(`[/daily-send] שגיאה בשליחת וואטסאפ: ${err.message}`);
+        return sendJson(res, 502, { error: 'WHATSAPP_SEND_FAILED', message: err.message });
+      }
+
+      const allOk = sendResults.every((r) => r.ok);
+      console.log(`[/daily-send] נשלח (ok=${allOk}) לנמענים: ${sendResults.map((r) => `${r.to}:${r.ok}`).join(', ')}`);
+      return sendJson(res, allOk ? 200 : 207, { ok: allOk, text, sendResults });
+    }
+
     sendHtml(res, 404, 'Not found');
   } catch (err) {
     console.error(err);
@@ -504,4 +693,7 @@ module.exports = {
   getStaffName,
   getServiceName,
   isPsychologicalTreatment,
+  heDateLabel,
+  weekdayIndexOfIsoDate,
+  buildWhatsAppText,
 };
