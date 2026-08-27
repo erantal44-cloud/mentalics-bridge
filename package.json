@@ -1,14 +1,13 @@
 {
   "name": "mentalics-bridge",
   "version": "1.0.0",
-  "description": "שרת גישור פרטי בין מכון מנטליקס לבין רפיד וואן - שומר עוגיית session עדכנית ומספק סיכום יומי (לו\"ז + בדיקת גבייה)",
   "private": true,
-  "main": "server.js",
+  "description": "שרת גישור פרטי - מכון מנטליקס <-> רפיד וואן + יצירת PDF לדוח הבוקר",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "postinstall": "playwright install chromium"
   },
-  "engines": {
-    "node": ">=18.0.0"
-  },
-  "dependencies": {}
+  "dependencies": {
+    "playwright": "1.47.2"
+  }
 }
