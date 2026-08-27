@@ -385,7 +385,7 @@ function buildReport(appointments, { today, yesterday, dayPlus1, dayPlus2 }) {
   };
 }
 
-// --- בניית טקסט הודעת הוואטסאפ היומית מתוך הדוח (report מ-buildReport) + טקסט פניות (מהג'ימייל) ---
+// --- בניית טקסט הודעת הוואטסאפ היומית מתוך הדוח (report מ-buildReport) + טקסט פניות (מהג'ימייל) - משמש כגיבוי אם ה-PDF נכשל ---
 function buildWhatsAppText(report, leadsText) {
   const { today, dayPlus1 } = report.dates;
   const todayIdx = weekdayIndexOfIsoDate(today);
@@ -395,7 +395,6 @@ function buildWhatsAppText(report, leadsText) {
   lines.push(heDateLabel(today));
   lines.push('');
 
-  // לו"ז היום - רק רופאים (todaySchedule כבר מסונן ב-buildReport)
   lines.push('🗓️ לו"ז היום:');
   const doctorNames = Object.keys(report.todaySchedule).sort();
   if (doctorNames.length === 0) {
@@ -412,7 +411,6 @@ function buildWhatsAppText(report, leadsText) {
   }
   lines.push('');
 
-  // בדיקת גבייה - אתמול (הודעה כללית לכל רופא, לפי הכלל שסוכם - לא ניחוש פרטים עדינים)
   lines.push('💳 בדיקת גבייה (אתמול):');
   const needsAttention = report.eveningBillingCheck.filter((e) => e.needsAttention);
   if (needsAttention.length === 0) {
@@ -432,7 +430,6 @@ function buildWhatsAppText(report, leadsText) {
   }
   lines.push('');
 
-  // מחר - סגור בשבת, או מספר פגישות קבועות לכל רופא
   const tomorrowIdx = weekdayIndexOfIsoDate(dayPlus1);
   lines.push(`📆 מחר (${heDateLabel(dayPlus1)}):`);
   if (tomorrowIdx === 6) {
@@ -450,7 +447,6 @@ function buildWhatsAppText(report, leadsText) {
   }
   lines.push('');
 
-  // סדר יום קבוע למשרד + תזכורת עציצים (שני/חמישי בלבד, מובלטת)
   lines.push('🧹 סדר יום למשרד:');
   lines.push('- לרוקן פחים בחדרים.');
   lines.push('- לסדר את המכון בבוקר.');
@@ -464,7 +460,6 @@ function buildWhatsAppText(report, leadsText) {
   }
   lines.push('');
 
-  // פניות מהלילה (מייל - מגיע כפרמטר leads; וואטסאפ תמיד דורש בדיקה ידנית)
   lines.push('📞 פניות מהלילה:');
   lines.push(leadsText && leadsText.trim() ? leadsText.trim() : 'לא התקבל סיכום פניות הפעם.');
   lines.push('');
@@ -474,7 +469,7 @@ function buildWhatsAppText(report, leadsText) {
   return lines.join('\n');
 }
 
-// --- שליחת טקסט ההודעה לכל הנמענים דרך שרת הוואטסאפ (server-to-server, בלי מגבלת אורך URL) ---
+// --- שליחת טקסט ההודעה לכל הנמענים (גיבוי בלבד - משמש רק אם ה-PDF נכשל) ---
 async function sendWhatsAppText(text) {
   const sendUrl = process.env.WHATSAPP_SEND_URL || 'https://mentalics-whatsapp.onrender.com/send';
   const secret = process.env.WHATSAPP_SECRET;
@@ -499,6 +494,167 @@ async function sendWhatsAppText(text) {
         body = await resp.json();
       } catch {
         // גוף לא-JSON - נשאיר body ריק, נסתמך על resp.ok/status
+      }
+      results.push({ to, ok: resp.ok && body.ok !== false, status: resp.status, body });
+    } catch (err) {
+      results.push({ to, ok: false, error: err.message });
+    }
+  }
+  return results;
+}
+
+// --- בריחת HTML (מניעת שבירת התבנית ע"י תווים כמו < > & מתוך שמות/הערות אמיתיים) ---
+function escapeHtml(str) {
+  return String(str || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+// החלפה בטוחה של placeholder בתבנית (split/join, לא regex-replace - נמנע מבעיית "$" בטקסט המוחלף)
+function fillPlaceholder(html, token, value) {
+  return html.split(token).join(value);
+}
+
+// --- בניית קטעי ה-HTML הדינמיים לכל סעיף בתבנית ה-PDF (report-template.html) ---
+function buildScheduleRowsHtml(report) {
+  const doctorNames = Object.keys(report.todaySchedule).sort();
+  if (doctorNames.length === 0) {
+    return '<div class="empty">אין פגישות רופאים היום.</div>';
+  }
+  const rows = [];
+  for (const name of doctorNames) {
+    for (const appt of report.todaySchedule[name]) {
+      const subParts = [];
+      if (appt.customerName) subParts.push(escapeHtml(appt.customerName));
+      if (appt.notes) subParts.push(escapeHtml(appt.notes));
+      const subHtml = subParts.length ? `<div class="sub">${subParts.join(' — ')}</div>` : '';
+      rows.push(
+        `<div class="row"><span class="stripe ok"></span><div class="txt"><span class="name">${escapeHtml(name)}</span>${subHtml}</div><span class="time">${appt.time}–${appt.endTime}</span></div>`
+      );
+    }
+  }
+  return rows.join('\n');
+}
+function buildLeadsRowsHtml(leadsText) {
+  const lines = (leadsText || '').split('\n').map((l) => l.trim()).filter(Boolean);
+  if (!lines.length) {
+    return '<div class="empty">לא התקבלו פניות חדשות מהלילה (במייל).</div>';
+  }
+  return lines
+    .map((line) => `<div class="row"><span class="stripe ok"></span><div class="txt"><span class="name">${escapeHtml(line)}</span></div></div>`)
+    .join('\n');
+}
+function buildBillingRowsHtml(report) {
+  const needsAttention = report.eveningBillingCheck.filter((e) => e.needsAttention);
+  if (!needsAttention.length) {
+    return '<div class="row"><span class="stripe ok"></span><div class="txt"><span class="name">לא נמצאו פגישות הדורשות תשומת לב</span><span class="chip ok">תקין</span></div></div>';
+  }
+  const byDoctor = {};
+  for (const e of needsAttention) {
+    if (!byDoctor[e.staffName]) byDoctor[e.staffName] = [];
+    byDoctor[e.staffName].push(e);
+  }
+  const rows = [];
+  for (const doc of Object.keys(byDoctor)) {
+    const details = byDoctor[doc].map((e) => `${e.time} ${e.customerName || ''}`.trim()).join(', ');
+    rows.push(
+      `<div class="row"><span class="stripe danger"></span><div class="txt"><span class="name">${escapeHtml(doc)}</span><span class="chip danger">לוודא גבייה</span><div class="sub">${escapeHtml(details)}</div></div></div>`
+    );
+  }
+  return rows.join('\n');
+}
+function buildSpecialReminderRowsHtml(todayIdx) {
+  if (todayIdx === 1 || todayIdx === 4) {
+    return '<div class="row"><span class="stripe danger"></span><div class="txt"><span class="name">💧 להשקות את העציצים!</span><span class="chip danger">היום</span></div></div>';
+  }
+  return '<div class="empty">אין תזכורות מיוחדות אוטומטיות להיום.</div>';
+}
+function buildTomorrowLine(report) {
+  const { dayPlus1 } = report.dates;
+  const tomorrowIdx = weekdayIndexOfIsoDate(dayPlus1);
+  if (tomorrowIdx === 6) {
+    return `מחר (${heDateLabel(dayPlus1)}) — המכון סגור.`;
+  }
+  const counts = report.upcomingCounts[dayPlus1] || {};
+  const names = Object.keys(counts).sort();
+  if (!names.length) {
+    return `מחר (${heDateLabel(dayPlus1)}) — אין עדיין פגישות רשומות.`;
+  }
+  const parts = names.map((n) => `${n}: ${counts[n]}`).join(' · ');
+  return `מחר (${heDateLabel(dayPlus1)}) — ${parts}`;
+}
+
+// --- טעינת תבנית ה-HTML (עם קאשינג בזיכרון - הקובץ לא משתנה בזמן ריצה) ---
+let reportTemplateCache = null;
+function loadReportTemplate() {
+  if (!reportTemplateCache) {
+    reportTemplateCache = fs.readFileSync(path.join(__dirname, 'report-template.html'), 'utf8');
+  }
+  return reportTemplateCache;
+}
+
+// --- בניית ה-HTML המלא (לצורך המרה ל-PDF) מתוך report (buildReport) + טקסט פניות ---
+function renderReportHtml(report, leadsText) {
+  const { today, yesterday } = report.dates;
+  const todayIdx = weekdayIndexOfIsoDate(today);
+  const attentionCount = report.eveningBillingCheck.filter((e) => e.needsAttention).length;
+  const activeDoctorsCount = Object.keys(report.todaySchedule).length;
+
+  let html = loadReportTemplate();
+  html = fillPlaceholder(html, '{{DATE_LABEL}}', escapeHtml(heDateLabel(today)));
+  html = fillPlaceholder(html, '{{ATTENTION_COUNT}}', String(attentionCount));
+  html = fillPlaceholder(html, '{{ACTIVE_DOCTORS_COUNT}}', String(activeDoctorsCount));
+  html = fillPlaceholder(html, '{{DOCTOR_COUNT_NOTE}}', `${activeDoctorsCount} רופאים`);
+  html = fillPlaceholder(html, '{{SCHEDULE_ROWS}}', buildScheduleRowsHtml(report));
+  html = fillPlaceholder(html, '{{LEADS_ROWS}}', buildLeadsRowsHtml(leadsText));
+  html = fillPlaceholder(html, '{{YESTERDAY_LABEL}}', escapeHtml(heDateLabel(yesterday)));
+  html = fillPlaceholder(html, '{{BILLING_ROWS}}', buildBillingRowsHtml(report));
+  html = fillPlaceholder(html, '{{SPECIAL_REMINDER_ROWS}}', buildSpecialReminderRowsHtml(todayIdx));
+  html = fillPlaceholder(html, '{{TOMORROW_LINE}}', escapeHtml(buildTomorrowLine(report)));
+  return html;
+}
+
+// --- המרת HTML ל-PDF (Playwright/Chromium) - require מקומי כדי שלא יפיל את השרת אם החבילה חסרה ---
+async function renderPdfBuffer(html) {
+  const { chromium } = require('playwright');
+  const browser = await chromium.launch({ args: ['--no-sandbox'] });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(html, { waitUntil: 'load', timeout: 30000 });
+    return await page.pdf({ format: 'A4', printBackground: true });
+  } finally {
+    await browser.close();
+  }
+}
+
+// --- שליחת PDF כמסמך לכל הנמענים דרך שרת הוואטסאפ ---
+async function sendWhatsAppDocument(pdfBuffer, fileName, caption) {
+  const sendUrl = process.env.WHATSAPP_SEND_DOCUMENT_URL || 'https://mentalics-whatsapp.onrender.com/send-document';
+  const secret = process.env.WHATSAPP_SECRET;
+  const recipients = (process.env.REPORT_RECIPIENTS || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  if (!secret) throw new Error('MISSING_WHATSAPP_SECRET');
+  if (!recipients.length) throw new Error('MISSING_REPORT_RECIPIENTS');
+
+  const fileBase64 = pdfBuffer.toString('base64');
+  const results = [];
+  for (const to of recipients) {
+    try {
+      const resp = await fetch(`${sendUrl}?key=${encodeURIComponent(secret)}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ fileBase64, fileName, caption, mimetype: 'application/pdf', to }),
+      });
+      let body = {};
+      try {
+        body = await resp.json();
+      } catch {
+        // גוף לא-JSON - נשאיר body ריק
       }
       results.push({ to, ok: resp.ok && body.ok !== false, status: resp.status, body });
     } catch (err) {
@@ -558,10 +714,6 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (pathname === '/raw' && req.method === 'GET') {
-      // נתיב כללי: מחזיר פגישות גולמיות (כל השדות, כמו שרפיד וואן מחזירה) לטווח תאריכים.
-      // כל הסינון/ההיגיון העסקי (מי רלוונטי, אילו כללים חלים) מתבצע בצד השיחה, לא כאן.
-      // from/to הם תאריכי יומן ישראל (YYYY-MM-DD); to הוא לא כולל (חצות ישראל של אותו תאריך).
-      // ברירת מחדל: מאתמול ועד 7 ימים קדימה - מספיק להסתכל אחורה (גבייה/סיכומים) וקדימה (מיזוג/לו"ז).
       const key = url.searchParams.get('key');
       if (!checkSecret(key)) return sendJson(res, 403, { error: 'FORBIDDEN' });
       const from = url.searchParams.get('from') || israelDateParts(-1).iso;
@@ -620,9 +772,6 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (pathname === '/daily-send' && req.method === 'GET') {
-      // נתיב לאוטומציה: משימה מתוזמנת קוראת לכאן פעם ביום עם GET קצר (leads=סיכום פניות מהלילה),
-      // והשרת עצמו (שרת-לשרת, לא קלוד) בונה את טקסט הדוח המלא ושולח אותו בוואטסאפ לכל הנמענים.
-      // כך נמנעים לגמרי ממגבלת אורך ה-URL של WebFetch שגילינו קודם.
       const key = url.searchParams.get('key');
       if (!checkSecret(key)) return sendJson(res, 403, { error: 'FORBIDDEN' });
       if (!state.headers) {
@@ -657,19 +806,31 @@ const server = http.createServer(async (req, res) => {
       }
 
       const report = buildReport(appointments, { today, yesterday, dayPlus1, dayPlus2 });
-      const text = buildWhatsAppText(report, leadsText);
 
+      // מנסים קודם PDF מעוצב; אם משהו בייצור/שליחת ה-PDF נכשל (למשל Chromium לא הותקן כמו שצריך) -
+      // נופלים אוטומטית חזרה לשליחת טקסט פשוט, כדי שהדוח היומי לא "ייעלם" בגלל תקלה בשלב הזה.
       let sendResults;
+      let mode = 'pdf';
       try {
-        sendResults = await sendWhatsAppText(text);
-      } catch (err) {
-        console.error(`[/daily-send] שגיאה בשליחת וואטסאפ: ${err.message}`);
-        return sendJson(res, 502, { error: 'WHATSAPP_SEND_FAILED', message: err.message });
+        const html = renderReportHtml(report, leadsText);
+        const pdfBuffer = await renderPdfBuffer(html);
+        const caption = `📋 דוח בוקר - מכון מנטליקס - ${heDateLabel(today)}`;
+        sendResults = await sendWhatsAppDocument(pdfBuffer, `mentalics-daily-report-${today}.pdf`, caption);
+      } catch (pdfErr) {
+        console.error(`[/daily-send] יצירת/שליחת PDF נכשלה (${pdfErr.message}) - נופל חזרה לשליחת טקסט.`);
+        mode = 'text-fallback';
+        try {
+          const text = buildWhatsAppText(report, leadsText);
+          sendResults = await sendWhatsAppText(text);
+        } catch (textErr) {
+          console.error(`[/daily-send] גם שליחת הטקסט הרזרבי נכשלה: ${textErr.message}`);
+          return sendJson(res, 502, { error: 'WHATSAPP_SEND_FAILED', message: textErr.message, pdfError: pdfErr.message });
+        }
       }
 
       const allOk = sendResults.every((r) => r.ok);
-      console.log(`[/daily-send] נשלח (ok=${allOk}) לנמענים: ${sendResults.map((r) => `${r.to}:${r.ok}`).join(', ')}`);
-      return sendJson(res, allOk ? 200 : 207, { ok: allOk, text, sendResults });
+      console.log(`[/daily-send] מצב=${mode} נשלח (ok=${allOk}) לנמענים: ${sendResults.map((r) => `${r.to}:${r.ok}`).join(', ')}`);
+      return sendJson(res, allOk ? 200 : 207, { ok: allOk, mode, sendResults });
     }
 
     sendHtml(res, 404, 'Not found');
@@ -696,4 +857,6 @@ module.exports = {
   heDateLabel,
   weekdayIndexOfIsoDate,
   buildWhatsAppText,
+  renderReportHtml,
+  buildTomorrowLine,
 };
