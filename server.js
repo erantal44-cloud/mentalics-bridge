@@ -4,9 +4,9 @@
 // מה הוא עושה:
 // 1. שומר "חתימת בקשה" עדכנית (כל הכותרות שרפיד וואן דורש - כולל Cookie ו-Authorization)
 //    שמודבקת ידנית פעם ביום/כמה ימים דרך /admin (העתקה מלאה כ-cURL מ-DevTools)
-// 2. מספק endpoint (/raw) שמחזיר פגישות גולמיות לטווח תאריכים - כל ההיגיון העסקי
-//    (סינון, כללים) מתבצע בצד השיחה עם קלוד, לא בקוד עצמו.
-// 3. מספק גם /report - סיכום מובנה בסיסי (לו"ז היום, בדיקת גבייה, ספירת פגישות קרובות).
+// 2. מספק endpoint (/report) שמביא מרפיד וואן את כל הפגישות בטווח תאריכים רלוונטי,
+//    ומחזיר סיכום מובנה (JSON): לו"ז היום לפי רופא, בדיקת גבייה לרופא שעבד אתמול בערב,
+//    וספירת פגישות ליומיים הקרובים (לבדיקת "חורים" גסה).
 //
 // הערה חשובה: זה endpoint פנימי לא-רשמי של רפיד וואן (לא ה-Public API המתועד).
 // הוא יכול להשתנות או להישבר בכל עדכון של רפיד בלי אזהרה מראש.
@@ -282,6 +282,15 @@ function isPsychologicalTreatment(appt) {
   const service = getServiceName(appt) || '';
   return group.includes('פסיכולוג') || service.includes('פסיכולוגי');
 }
+// זיהוי אם staffName הוא רופא/ה (ולא איש/אשת צוות אחר) - ברפיד וואן רופאים מופיעים כ"דר " (בלי גרשיים) או "פרופ'"
+function isDoctorStaffName(staffName) {
+  const s = (staffName || '').trim();
+  return s.startsWith('דר ') || s.startsWith('פרופ');
+}
+// "כללי כללי" הוא סימון פנימי של המכון (לא לקוח/פגישה אמיתיים) - למשל חסימת זמן/חופשה
+function isPlaceholderBlock(appt) {
+  return (appt.customerName || '').trim() === 'כללי כללי';
+}
 
 // --- בניית הדוח (הלוגיקה העסקית - ניתנת לבדיקה בנפרד) ---
 function buildReport(appointments, { today, yesterday, dayPlus1, dayPlus2 }) {
@@ -295,20 +304,21 @@ function buildReport(appointments, { today, yesterday, dayPlus1, dayPlus2 }) {
     const dateOnly = isoDateOnly(appt.startDate);
     const staffName = getStaffName(appt);
     const serviceName = getServiceName(appt);
+    const placeholder = isPlaceholderBlock(appt);
 
-    if (dateOnly === today) {
+    if (dateOnly === today && isDoctorStaffName(staffName)) {
       if (!todaySchedule[staffName]) todaySchedule[staffName] = [];
       todaySchedule[staffName].push({
         time: (appt.startDate || '').slice(11, 16),
         endTime: (appt.endDate || '').slice(11, 16),
-        customerName: appt.customerName || '',
+        customerName: placeholder ? '' : (appt.customerName || ''),
         status: appt.bookingStatusName || '',
         service: serviceName,
         notes: appt.notes || '',
       });
     }
 
-    if (dateOnly === yesterday) {
+    if (dateOnly === yesterday && !placeholder) {
       const h = hourOf(appt.startDate);
       if (h !== null && h >= EVENING_CUTOFF_HOUR) {
         if (isPsychologicalTreatment(appt)) {
@@ -331,7 +341,7 @@ function buildReport(appointments, { today, yesterday, dayPlus1, dayPlus2 }) {
       }
     }
 
-    if (dateOnly === dayPlus1 || dateOnly === dayPlus2) {
+    if ((dateOnly === dayPlus1 || dateOnly === dayPlus2) && !placeholder) {
       if (!upcomingCounts[dateOnly]) upcomingCounts[dateOnly] = {};
       upcomingCounts[dateOnly][staffName] = (upcomingCounts[dateOnly][staffName] || 0) + 1;
     }
