@@ -195,6 +195,22 @@ function israelMidnightUtcDate(isoDateStr) {
   return new Date(guessUtcMidnight.getTime() - offsetMin * 60000);
 }
 
+// --- תיקון באג אזור זמן: רפיד וואן מחזירה את startDate/endDate ב-UTC, לא בשעון ישראל ---
+// הפונקציה ממירה מחרוזת UTC (כמו שמגיעה מרפיד) למחרוזת "מקומית" (שעון ישראל, קיץ/חורף אוטומטי לפי
+// israelOffsetMinutes), באותו פורמט ISO (YYYY-MM-DDTHH:MM:SS) - כדי שאפשר להמשיך להשתמש ב-
+// isoDateOnly/hourOf/slice(11,16) הרגילים על הפלט שלה, בלי לשנות את הפונקציות עצמן.
+function utcToIsraelIsoString(rapidDateStr) {
+  if (!rapidDateStr) return rapidDateStr;
+  // אם המחרוזת כבר כוללת אינדיקציית אזור זמן (Z או ‎+HH:MM/-HH:MM‎) - מפרשים אותה כמו שהיא.
+  // אם לא - רפיד מחזירה UTC "עירום" (בלי Z), אז מוסיפים Z כדי שתתפרש נכון כ-UTC ולא כשעון מקומי של השרת.
+  const hasTz = /Z$|[+-]\d{2}:?\d{2}$/.test(rapidDateStr);
+  const utcDate = new Date(hasTz ? rapidDateStr : `${rapidDateStr}Z`);
+  if (isNaN(utcDate.getTime())) return rapidDateStr; // הגנה - אם הפרסור נכשל, מחזירים את המקור
+  const offsetMin = israelOffsetMinutes(utcDate);
+  const localDate = new Date(utcDate.getTime() + offsetMin * 60000);
+  return localDate.toISOString().slice(0, 19); // "YYYY-MM-DDTHH:MM:SS" - שעון ישראל, בפורמט UTC-ish לצורך slice
+}
+
 // --- קריאה בפועל לרפיד וואן ---
 async function fetchRapidAppointments(fromDateOnly, toExclusiveDateOnly) {
   if (!state.headers || (!state.headers.cookie && !state.headers.authorization)) {
@@ -324,7 +340,10 @@ function buildReport(appointments, { today, yesterday, dayPlus1, dayPlus2 }) {
 
   for (const appt of appointments) {
     if (appt.isDeleted) continue;
-    const dateOnly = isoDateOnly(appt.startDate);
+    // רפיד וואן מחזירה startDate/endDate ב-UTC - ממירים לשעון ישראל לפני כל שימוש בתאריך/שעה שלהם.
+    const startLocal = utcToIsraelIsoString(appt.startDate);
+    const endLocal = utcToIsraelIsoString(appt.endDate);
+    const dateOnly = isoDateOnly(startLocal);
     const staffName = getStaffName(appt);
     const serviceName = getServiceName(appt);
     const placeholder = isPlaceholderBlock(appt);
@@ -332,8 +351,8 @@ function buildReport(appointments, { today, yesterday, dayPlus1, dayPlus2 }) {
     if (dateOnly === today && isDoctorStaffName(staffName)) {
       if (!todaySchedule[staffName]) todaySchedule[staffName] = [];
       todaySchedule[staffName].push({
-        time: (appt.startDate || '').slice(11, 16),
-        endTime: (appt.endDate || '').slice(11, 16),
+        time: (startLocal || '').slice(11, 16),
+        endTime: (endLocal || '').slice(11, 16),
         customerName: placeholder ? '' : (appt.customerName || ''),
         status: appt.bookingStatusName || '',
         service: serviceName,
@@ -342,7 +361,7 @@ function buildReport(appointments, { today, yesterday, dayPlus1, dayPlus2 }) {
     }
 
     if (dateOnly === yesterday && !placeholder) {
-      const h = hourOf(appt.startDate);
+      const h = hourOf(startLocal);
       if (h !== null && h >= EVENING_CUTOFF_HOUR) {
         if (isPsychologicalTreatment(appt)) {
           filteredPsychologicalCount += 1;
@@ -352,7 +371,7 @@ function buildReport(appointments, { today, yesterday, dayPlus1, dayPlus2 }) {
           eveningBillingCheck.push({
             staffName,
             service: serviceName,
-            time: (appt.startDate || '').slice(11, 16),
+            time: (startLocal || '').slice(11, 16),
             customerName: appt.customerName || '',
             isPaid: appt.isPaid,
             hasInvoice: appt.hasInvoice,
@@ -385,7 +404,7 @@ function buildReport(appointments, { today, yesterday, dayPlus1, dayPlus2 }) {
   };
 }
 
-// --- בניית טקסט הודעת הוואטסאפ היומית מתוך הדוח (report מ-buildReport) + טקסט פניות (מהג'ימייל) - משמש כגיבוי אם ה-PDF נכשל ---
+// --- בניית טקסט הודעת הוואטסאפ היומית מתוך הדוח (report מ-buildReport) + טקסט פניות (מהג'ימייל) ---
 function buildWhatsAppText(report, leadsText) {
   const { today, dayPlus1 } = report.dates;
   const todayIdx = weekdayIndexOfIsoDate(today);
@@ -395,6 +414,7 @@ function buildWhatsAppText(report, leadsText) {
   lines.push(heDateLabel(today));
   lines.push('');
 
+  // לו"ז היום - רק רופאים (todaySchedule כבר מסונן ב-buildReport)
   lines.push('🗓️ לו"ז היום:');
   const doctorNames = Object.keys(report.todaySchedule).sort();
   if (doctorNames.length === 0) {
@@ -411,6 +431,7 @@ function buildWhatsAppText(report, leadsText) {
   }
   lines.push('');
 
+  // בדיקת גבייה - אתמול (הודעה כללית לכל רופא, לפי הכלל שסוכם - לא ניחוש פרטים עדינים)
   lines.push('💳 בדיקת גבייה (אתמול):');
   const needsAttention = report.eveningBillingCheck.filter((e) => e.needsAttention);
   if (needsAttention.length === 0) {
@@ -430,6 +451,7 @@ function buildWhatsAppText(report, leadsText) {
   }
   lines.push('');
 
+  // מחר - סגור בשבת, או מספר פגישות קבועות לכל רופא
   const tomorrowIdx = weekdayIndexOfIsoDate(dayPlus1);
   lines.push(`📆 מחר (${heDateLabel(dayPlus1)}):`);
   if (tomorrowIdx === 6) {
@@ -447,6 +469,7 @@ function buildWhatsAppText(report, leadsText) {
   }
   lines.push('');
 
+  // סדר יום קבוע למשרד + תזכורת עציצים (שני/חמישי בלבד, מובלטת)
   lines.push('🧹 סדר יום למשרד:');
   lines.push('- לרוקן פחים בחדרים.');
   lines.push('- לסדר את המכון בבוקר.');
@@ -460,6 +483,7 @@ function buildWhatsAppText(report, leadsText) {
   }
   lines.push('');
 
+  // פניות מהלילה (מייל - מגיע כפרמטר leads; וואטסאפ תמיד דורש בדיקה ידנית)
   lines.push('📞 פניות מהלילה:');
   lines.push(leadsText && leadsText.trim() ? leadsText.trim() : 'לא התקבל סיכום פניות הפעם.');
   lines.push('');
@@ -469,7 +493,7 @@ function buildWhatsAppText(report, leadsText) {
   return lines.join('\n');
 }
 
-// --- שליחת טקסט ההודעה לכל הנמענים (גיבוי בלבד - משמש רק אם ה-PDF נכשל) ---
+// --- שליחת טקסט ההודעה לכל הנמענים דרך שרת הוואטסאפ (server-to-server, בלי מגבלת אורך URL) ---
 async function sendWhatsAppText(text) {
   const sendUrl = process.env.WHATSAPP_SEND_URL || 'https://mentalics-whatsapp.onrender.com/send';
   const secret = process.env.WHATSAPP_SECRET;
@@ -517,6 +541,18 @@ function fillPlaceholder(html, token, value) {
   return html.split(token).join(value);
 }
 
+// --- שיוך צבע קבוע לכל רופא/ה (לפי hash של השם) - כדי שאותו/ה רופא/ה יקבל/תקבל תמיד את אותו צבע,
+// גם בין ימים שונים, ולא רק לפי סדר במסך של אותו יום. עוזר להבחין מהר בין כמה רופאים בו-זמנית בדוח. ---
+const DOCTOR_STRIPE_COLORS = ['doc-blue', 'doc-purple', 'doc-teal', 'doc-pink', 'doc-amber'];
+function stripeColorForDoctor(staffName) {
+  const s = String(staffName || '');
+  let hash = 0;
+  for (let i = 0; i < s.length; i++) {
+    hash = (hash * 31 + s.charCodeAt(i)) >>> 0;
+  }
+  return DOCTOR_STRIPE_COLORS[hash % DOCTOR_STRIPE_COLORS.length];
+}
+
 // --- בניית קטעי ה-HTML הדינמיים לכל סעיף בתבנית ה-PDF (report-template.html) ---
 function buildScheduleRowsHtml(report) {
   const doctorNames = Object.keys(report.todaySchedule).sort();
@@ -525,13 +561,14 @@ function buildScheduleRowsHtml(report) {
   }
   const rows = [];
   for (const name of doctorNames) {
+    const stripeColor = stripeColorForDoctor(name);
     for (const appt of report.todaySchedule[name]) {
       const subParts = [];
       if (appt.customerName) subParts.push(escapeHtml(appt.customerName));
       if (appt.notes) subParts.push(escapeHtml(appt.notes));
       const subHtml = subParts.length ? `<div class="sub">${subParts.join(' — ')}</div>` : '';
       rows.push(
-        `<div class="row"><span class="stripe ok"></span><div class="txt"><span class="name">${escapeHtml(name)}</span>${subHtml}</div><span class="time">${appt.time}–${appt.endTime}</span></div>`
+        `<div class="row"><span class="stripe ${stripeColor}"></span><div class="txt"><span class="name">${escapeHtml(name)}</span>${subHtml}</div><span class="time">${appt.time}–${appt.endTime}</span></div>`
       );
     }
   }
@@ -714,6 +751,10 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (pathname === '/raw' && req.method === 'GET') {
+      // נתיב כללי: מחזיר פגישות גולמיות (כל השדות, כמו שרפיד וואן מחזירה) לטווח תאריכים.
+      // כל הסינון/ההיגיון העסקי (מי רלוונטי, אילו כללים חלים) מתבצע בצד השיחה, לא כאן.
+      // from/to הם תאריכי יומן ישראל (YYYY-MM-DD); to הוא לא כולל (חצות ישראל של אותו תאריך).
+      // ברירת מחדל: מאתמול ועד 7 ימים קדימה - מספיק להסתכל אחורה (גבייה/סיכומים) וקדימה (מיזוג/לו"ז).
       const key = url.searchParams.get('key');
       if (!checkSecret(key)) return sendJson(res, 403, { error: 'FORBIDDEN' });
       const from = url.searchParams.get('from') || israelDateParts(-1).iso;
@@ -772,6 +813,9 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (pathname === '/daily-send' && req.method === 'GET') {
+      // נתיב לאוטומציה: משימה מתוזמנת קוראת לכאן פעם ביום עם GET קצר (leads=סיכום פניות מהלילה),
+      // והשרת עצמו (שרת-לשרת, לא קלוד) בונה את טקסט הדוח המלא ושולח אותו בוואטסאפ לכל הנמענים.
+      // כך נמנעים לגמרי ממגבלת אורך ה-URL של WebFetch שגילינו קודם.
       const key = url.searchParams.get('key');
       if (!checkSecret(key)) return sendJson(res, 403, { error: 'FORBIDDEN' });
       if (!state.headers) {
@@ -851,6 +895,7 @@ module.exports = {
   hourOf,
   parseCurlHeaders,
   israelMidnightUtcDate,
+  utcToIsraelIsoString,
   getStaffName,
   getServiceName,
   isPsychologicalTreatment,
@@ -859,4 +904,5 @@ module.exports = {
   buildWhatsAppText,
   renderReportHtml,
   buildTomorrowLine,
+  stripeColorForDoctor,
 };
