@@ -563,10 +563,8 @@ function buildScheduleRowsHtml(report) {
   for (const name of doctorNames) {
     const stripeColor = stripeColorForDoctor(name);
     for (const appt of report.todaySchedule[name]) {
-      const subParts = [];
-      if (appt.customerName) subParts.push(escapeHtml(appt.customerName));
-      if (appt.notes) subParts.push(escapeHtml(appt.notes));
-      const subHtml = subParts.length ? `<div class="sub">${subParts.join(' — ')}</div>` : '';
+      // לפי בקשת המשתמש (31/8): רק שם רופא + שם לקוח + שעה בשורת הלו"ז - בלי הערות/סיבת פגישה (מידע רגיש מדי).
+      const subHtml = appt.customerName ? `<div class="sub">${escapeHtml(appt.customerName)}</div>` : '';
       rows.push(
         `<div class="row"><span class="stripe ${stripeColor}"></span><div class="txt"><span class="name">${escapeHtml(name)}</span>${subHtml}</div><span class="time">${appt.time}–${appt.endTime}</span></div>`
       );
