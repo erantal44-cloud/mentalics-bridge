@@ -338,6 +338,22 @@ function buildReport(appointments, { today, yesterday, dayPlus1, dayPlus2 }) {
   const upcomingCounts = {};
   let filteredPsychologicalCount = 0;
 
+  // ד"ר עודד טלמור (1/9, לפי בקשת המשתמש): ברביעי - לוודא שנשלחו הסיכומים משלישי בערב (אתמול).
+  // בראשון - לוודא שנשלחו הסיכומים משישי בבוקר (יומיים אחורה, כי שבת סגור - אין בדיקה בשבת עצמה).
+  // זו לא בדיקה אוטומטית של "האם באמת נשלח" (אין לזה מקור נתונים ברפיד וואן) - רק תזכורת שמופיעה
+  // כשהוא בכלל עבד ביום הרלוונטי, כדי לא להטריד תזכורת מיותרת בימים שהוא לא עבד.
+  const todayIdx = weekdayIndexOfIsoDate(today);
+  let talmorCheckDate = null;
+  let talmorWorkdayLabel = '';
+  if (todayIdx === 3) {
+    talmorCheckDate = yesterday; // שלישי
+    talmorWorkdayLabel = 'שלישי בערב';
+  } else if (todayIdx === 0) {
+    talmorCheckDate = israelDateParts(-2).iso; // שישי
+    talmorWorkdayLabel = 'שישי בבוקר';
+  }
+  let talmorWorked = false;
+
   for (const appt of appointments) {
     if (appt.isDeleted) continue;
     // רפיד וואן מחזירה startDate/endDate ב-UTC - ממירים לשעון ישראל לפני כל שימוש בתאריך/שעה שלהם.
@@ -348,12 +364,14 @@ function buildReport(appointments, { today, yesterday, dayPlus1, dayPlus2 }) {
     const serviceName = getServiceName(appt);
     const placeholder = isPlaceholderBlock(appt);
 
-    if (dateOnly === today && isDoctorStaffName(staffName)) {
+    // הערה (1/9): "כללי כללי" וכו' (placeholder) מדולג עכשיו גם בלו"ז היום, לא רק בגבייה/ספירה -
+    // מאז שהוסרו ההערות (notes) מהלו"ז, אין יותר סיבה טובה להציג שורת פגישה ריקה/מטעה.
+    if (dateOnly === today && isDoctorStaffName(staffName) && !placeholder) {
       if (!todaySchedule[staffName]) todaySchedule[staffName] = [];
       todaySchedule[staffName].push({
         time: (startLocal || '').slice(11, 16),
         endTime: (endLocal || '').slice(11, 16),
-        customerName: placeholder ? '' : (appt.customerName || ''),
+        customerName: appt.customerName || '',
         status: appt.bookingStatusName || '',
         service: serviceName,
         notes: appt.notes || '',
@@ -367,7 +385,12 @@ function buildReport(appointments, { today, yesterday, dayPlus1, dayPlus2 }) {
           filteredPsychologicalCount += 1;
         } else {
           const balance = typeof appt.patientBalance === 'number' ? appt.patientBalance : null;
-          const needsAttention = appt.isPaid === false || appt.hasInvoice === false || (balance !== null && balance < 0);
+          // הערה (1/9): appt.hasInvoice הוסר מתנאי needsAttention בכוונה - נבדק בפועל מול רפיד וואן
+          // (121 פגישות, 31/8) ונמצא ש-hasInvoice הוא false בול ל-100% מהפגישות, ללא יוצא מן הכלל,
+          // כולל פגישות עם isPaid=true ו-patientBalance=0 (משולמות במלואן). כלומר השדה הזה לא אמין/לא
+          // מאוכלס בפועל ב-endpoint הזה, וגרם לרוב הפגישות המשולמות להיתפס בטעות כ"דורשות תשומת לב".
+          // הסימנים האמיתיים והאמינים הם isPaid ו-patientBalance בלבד.
+          const needsAttention = appt.isPaid === false || (balance !== null && balance < 0);
           eveningBillingCheck.push({
             staffName,
             service: serviceName,
@@ -387,6 +410,10 @@ function buildReport(appointments, { today, yesterday, dayPlus1, dayPlus2 }) {
       if (!upcomingCounts[dateOnly]) upcomingCounts[dateOnly] = {};
       upcomingCounts[dateOnly][staffName] = (upcomingCounts[dateOnly][staffName] || 0) + 1;
     }
+
+    if (talmorCheckDate && dateOnly === talmorCheckDate && !placeholder && staffName.includes('טלמור')) {
+      talmorWorked = true;
+    }
   }
 
   for (const staffName of Object.keys(todaySchedule)) {
@@ -400,6 +427,7 @@ function buildReport(appointments, { today, yesterday, dayPlus1, dayPlus2 }) {
     eveningBillingCheck,
     filteredPsychologicalCount,
     upcomingCounts,
+    talmorReminder: talmorCheckDate ? { checkDate: talmorCheckDate, workdayLabel: talmorWorkdayLabel, worked: talmorWorked } : null,
     note: 'upcomingCounts היא ספירה גולמית של פגישות קיימות בלבד - לא בדיקת "חורים" אמיתית מול שעות עבודה מלאות של כל רופא. eveningBillingCheck כולל רק טיפולים פסיכיאטריים (לא פסיכולוגיים) - ראה filteredPsychologicalCount למספר שסוננו.',
   };
 }
@@ -458,13 +486,18 @@ function buildWhatsAppText(report, leadsText) {
     lines.push('המכון סגור (שבת).');
   } else {
     const counts = report.upcomingCounts[dayPlus1] || {};
-    const names = Object.keys(counts).sort();
-    if (names.length === 0) {
+    const allNames = Object.keys(counts).sort();
+    if (allNames.length === 0) {
       lines.push('אין עדיין פגישות רשומות.');
     } else {
-      for (const n of names) {
-        lines.push(`  ${n}: ${counts[n]} פגישות קבועות`);
-      }
+      const doctorNames = allNames.filter((n) => isDoctorStaffName(n));
+      const otherNames = allNames.filter((n) => !isDoctorStaffName(n));
+      lines.push('רופאים:');
+      if (!doctorNames.length) lines.push('  אין פגישות רשומות.');
+      for (const n of doctorNames) lines.push(`  ${n}: ${counts[n]} פגישות קבועות`);
+      lines.push('שאר המטפלים:');
+      if (!otherNames.length) lines.push('  אין פגישות רשומות.');
+      for (const n of otherNames) lines.push(`  ${n}: ${counts[n]} פגישות קבועות`);
     }
   }
   lines.push('');
@@ -480,6 +513,10 @@ function buildWhatsAppText(report, leadsText) {
   if (todayIdx === 1 || todayIdx === 4) {
     lines.push('');
     lines.push('🌱🚨 תזכורת חשובה - להשקות את העציצים!! 🚨🌱');
+  }
+  if (report.talmorReminder && report.talmorReminder.worked) {
+    lines.push('');
+    lines.push(`📝 תזכורת - לוודא שנשלחו הסיכומים של ד"ר עודד טלמור (${report.talmorReminder.workdayLabel})`);
   }
   lines.push('');
 
@@ -559,18 +596,22 @@ function buildScheduleRowsHtml(report) {
   if (doctorNames.length === 0) {
     return '<div class="empty">אין פגישות רופאים היום.</div>';
   }
-  const rows = [];
+  // לפי בקשת המשתמש (1/9): שם הרופא/ה כשורת כותרת נפרדת (פעם אחת), והפגישות מתחתיו כשורות מוזחות
+  // (לא הכל בשורה אופקית אחת עם שם הרופא חוזר על עצמו בכל פגישה). רק שם לקוח + שעה בכל שורת פגישה.
+  const groups = [];
   for (const name of doctorNames) {
     const stripeColor = stripeColorForDoctor(name);
-    for (const appt of report.todaySchedule[name]) {
-      // לפי בקשת המשתמש (31/8): רק שם רופא + שם לקוח + שעה בשורת הלו"ז - בלי הערות/סיבת פגישה (מידע רגיש מדי).
-      const subHtml = appt.customerName ? `<div class="sub">${escapeHtml(appt.customerName)}</div>` : '';
-      rows.push(
-        `<div class="row"><span class="stripe ${stripeColor}"></span><div class="txt"><span class="name">${escapeHtml(name)}</span>${subHtml}</div><span class="time">${appt.time}–${appt.endTime}</span></div>`
-      );
-    }
+    const apptLines = report.todaySchedule[name]
+      .map((appt) => {
+        const who = appt.customerName ? escapeHtml(appt.customerName) : '(חסימה פנימית)';
+        return `<div class="appt-line"><span class="cname">${who}</span><span class="time">${appt.time}–${appt.endTime}</span></div>`;
+      })
+      .join('\n');
+    groups.push(
+      `<div class="doctor-group"><div class="row doctor-header"><span class="stripe ${stripeColor}"></span><span class="txt"><span class="name">${escapeHtml(name)}</span></span></div>${apptLines}</div>`
+    );
   }
-  return rows.join('\n');
+  return groups.join('\n');
 }
 function buildLeadsRowsHtml(leadsText) {
   const lines = (leadsText || '').split('\n').map((l) => l.trim()).filter(Boolean);
@@ -600,25 +641,44 @@ function buildBillingRowsHtml(report) {
   }
   return rows.join('\n');
 }
-function buildSpecialReminderRowsHtml(todayIdx) {
+function buildSpecialReminderRowsHtml(todayIdx, talmorReminder) {
+  const rows = [];
   if (todayIdx === 1 || todayIdx === 4) {
-    return '<div class="row"><span class="stripe danger"></span><div class="txt"><span class="name">💧 להשקות את העציצים!</span><span class="chip danger">היום</span></div></div>';
+    rows.push('<div class="row"><span class="stripe danger"></span><div class="txt"><span class="name">💧 להשקות את העציצים!</span><span class="chip danger">היום</span></div></div>');
   }
-  return '<div class="empty">אין תזכורות מיוחדות אוטומטיות להיום.</div>';
+  // לפי בקשת המשתמש (1/9): רביעי - לוודא סיכומים משלישי בערב; ראשון - לוודא סיכומים משישי בבוקר -
+  // רק אם ד"ר טלמור בכלל עבד באותו יום (talmorReminder.worked).
+  if (talmorReminder && talmorReminder.worked) {
+    rows.push(
+      `<div class="row"><span class="stripe danger"></span><div class="txt"><span class="name">📝 לוודא שנשלחו הסיכומים של ד"ר עודד טלמור (${escapeHtml(talmorReminder.workdayLabel)})</span><span class="chip danger">היום</span></div></div>`
+    );
+  }
+  if (!rows.length) {
+    return '<div class="empty">אין תזכורות מיוחדות אוטומטיות להיום.</div>';
+  }
+  return rows.join('\n');
 }
+// לפי בקשת המשתמש (1/9): "מחר" מציג את כולם (לא רק רופאים) אבל בשתי שורות נפרדות - רופאים
+// (staffName שמתחיל ב"דר"/"פרופ'") ושאר שמות המטפלים - במקום רשימה אחת מעורבת.
+// מחזיר HTML גולמי (עם <br>) - שמות כבר escape-ים בפנים, אל תעטפו שוב ב-escapeHtml בצד הקורא.
 function buildTomorrowLine(report) {
   const { dayPlus1 } = report.dates;
   const tomorrowIdx = weekdayIndexOfIsoDate(dayPlus1);
+  const dateLabel = escapeHtml(heDateLabel(dayPlus1));
   if (tomorrowIdx === 6) {
-    return `מחר (${heDateLabel(dayPlus1)}) — המכון סגור.`;
+    return `מחר (${dateLabel}) — המכון סגור.`;
   }
   const counts = report.upcomingCounts[dayPlus1] || {};
-  const names = Object.keys(counts).sort();
-  if (!names.length) {
-    return `מחר (${heDateLabel(dayPlus1)}) — אין עדיין פגישות רשומות.`;
+  const allNames = Object.keys(counts).sort();
+  if (!allNames.length) {
+    return `מחר (${dateLabel}) — אין עדיין פגישות רשומות.`;
   }
-  const parts = names.map((n) => `${n}: ${counts[n]}`).join(' · ');
-  return `מחר (${heDateLabel(dayPlus1)}) — ${parts}`;
+  const doctorNames = allNames.filter((n) => isDoctorStaffName(n));
+  const otherNames = allNames.filter((n) => !isDoctorStaffName(n));
+  const fmt = (names) => names.map((n) => `${escapeHtml(n)}: ${counts[n]}`).join(' · ');
+  const doctorsPart = doctorNames.length ? `רופאים — ${fmt(doctorNames)}` : 'רופאים — אין פגישות רשומות.';
+  const othersPart = otherNames.length ? `שאר המטפלים — ${fmt(otherNames)}` : 'שאר המטפלים — אין פגישות רשומות.';
+  return `מחר (${dateLabel})<br>${doctorsPart}<br>${othersPart}`;
 }
 
 // --- טעינת תבנית ה-HTML (עם קאשינג בזיכרון - הקובץ לא משתנה בזמן ריצה) ---
@@ -646,8 +706,8 @@ function renderReportHtml(report, leadsText) {
   html = fillPlaceholder(html, '{{LEADS_ROWS}}', buildLeadsRowsHtml(leadsText));
   html = fillPlaceholder(html, '{{YESTERDAY_LABEL}}', escapeHtml(heDateLabel(yesterday)));
   html = fillPlaceholder(html, '{{BILLING_ROWS}}', buildBillingRowsHtml(report));
-  html = fillPlaceholder(html, '{{SPECIAL_REMINDER_ROWS}}', buildSpecialReminderRowsHtml(todayIdx));
-  html = fillPlaceholder(html, '{{TOMORROW_LINE}}', escapeHtml(buildTomorrowLine(report)));
+  html = fillPlaceholder(html, '{{SPECIAL_REMINDER_ROWS}}', buildSpecialReminderRowsHtml(todayIdx, report.talmorReminder));
+  html = fillPlaceholder(html, '{{TOMORROW_LINE}}', buildTomorrowLine(report)); // כבר escape-ד בפנים + כולל <br>, לא לעטוף שוב
   return html;
 }
 
@@ -779,10 +839,13 @@ const server = http.createServer(async (req, res) => {
       const dayPlus1 = israelDateParts(1).iso;
       const dayPlus2 = israelDateParts(2).iso;
       const dayPlus3 = israelDateParts(3).iso; // גבול עליון לא כולל, לטווח השאילתה בפועל
+      // בימי ראשון - מרחיבים את תחילת השליפה עד יום שישי (יומיים אחורה, לא רק אתמול=שבת) כדי שיהיו
+      // נתונים זמינים לבדיקת ד"ר טלמור (עבד שישי בבוקר?) - ראה talmorReminder ב-buildReport.
+      const fetchFromDate = weekdayIndexOfIsoDate(today) === 0 ? israelDateParts(-2).iso : yesterday;
 
       let appointments;
       try {
-        appointments = await fetchRapidAppointments(yesterday, dayPlus3);
+        appointments = await fetchRapidAppointments(fetchFromDate, dayPlus3);
       } catch (err) {
         console.error(`[/report] שגיאה: ${err.code || 'UNKNOWN'} - ${err.message}`);
         if (err.code === 'NO_AUTH_SAVED') {
@@ -829,10 +892,13 @@ const server = http.createServer(async (req, res) => {
       const dayPlus2 = israelDateParts(2).iso;
       const dayPlus3 = israelDateParts(3).iso;
       const leadsText = url.searchParams.get('leads') || '';
+      // בימי ראשון - מרחיבים את תחילת השליפה עד יום שישי (יומיים אחורה, לא רק אתמול=שבת) כדי שיהיו
+      // נתונים זמינים לבדיקת ד"ר טלמור (עבד שישי בבוקר?) - ראה talmorReminder ב-buildReport.
+      const fetchFromDate = weekdayIndexOfIsoDate(today) === 0 ? israelDateParts(-2).iso : yesterday;
 
       let appointments;
       try {
-        appointments = await fetchRapidAppointments(yesterday, dayPlus3);
+        appointments = await fetchRapidAppointments(fetchFromDate, dayPlus3);
       } catch (err) {
         console.error(`[/daily-send] שגיאה בשליפת נתונים מרפיד וואן: ${err.code || 'UNKNOWN'} - ${err.message}`);
         if (err.code === 'NO_AUTH_SAVED') {
