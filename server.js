@@ -411,6 +411,9 @@ function buildReport(appointments, { today, yesterday, dayPlus1, dayPlus2 }) {
             patientBalance: balance,
             price: appt.price,
             needsAttention,
+            // לפי בקשת המשתמש (5/9): אם כבר קיימת הערה על הפגישה (appt.notes) - היא מוצגת יחד עם
+            // הדגל, אבל הדגל עצמו לא מוסתר/מוחלש - המשרד מבצע בדיקה כפולה בעצמו ורוצה לראות הכל.
+            notes: appt.notes || '',
           });
         }
       }
@@ -494,7 +497,10 @@ function buildWhatsAppText(report, leadsText) {
     for (const doc of Object.keys(byDoctor)) {
       lines.push(`שימו לב, אתמול עבד/ה ${doc} - אנא וודאו גבייה:`);
       for (const e of byDoctor[doc]) {
-        lines.push(`  ${e.time} ${e.customerName || ''}`);
+        // לפי בקשת המשתמש (5/9): גם אם יש כבר הערה קיימת על הפגישה - היא מוצגת בנוסף לדגל, לא
+        // במקומו, כדי שהמשרד יוכל לבצע בדיקה כפולה משלו.
+        const noteSuffix = e.notes ? ` (יש הערה קיימת: ${e.notes})` : '';
+        lines.push(`  ${e.time} ${e.customerName || ''}${noteSuffix}`);
       }
     }
   }
@@ -667,7 +673,14 @@ function buildBillingRowsHtml(report) {
   }
   const rows = [];
   for (const doc of Object.keys(byDoctor)) {
-    const details = byDoctor[doc].map((e) => `${e.time} ${e.customerName || ''}`.trim()).join(', ');
+    // לפי בקשת המשתמש (5/9): הדגל ("לוודא גבייה") נשאר תמיד, גם כשיש הערה קיימת על הפגישה -
+    // ההערה רק מתווספת לצידו כמידע נוסף, כדי שהמשרד יבצע בדיקה כפולה משלו ולא תוסתר אף פגישה.
+    const details = byDoctor[doc]
+      .map((e) => {
+        const base = `${e.time} ${e.customerName || ''}`.trim();
+        return e.notes ? `${base} (יש הערה קיימת: ${e.notes})` : base;
+      })
+      .join(', ');
     rows.push(
       `<div class="row"><span class="stripe danger"></span><div class="txt"><span class="name">${escapeHtml(doc)}</span><span class="chip danger">לוודא גבייה</span><div class="sub">${escapeHtml(details)}</div></div></div>`
     );
