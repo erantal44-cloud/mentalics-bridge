@@ -338,21 +338,21 @@ function buildReport(appointments, { today, yesterday, dayPlus1, dayPlus2 }) {
   const upcomingCounts = {};
   let filteredPsychologicalCount = 0;
 
-  // ד"ר עודד טלמור (1/9, לפי בקשת המשתמש): ברביעי - לוודא שנשלחו הסיכומים משלישי בערב (אתמול).
-  // בראשון - לוודא שנשלחו הסיכומים משישי בבוקר (יומיים אחורה, כי שבת סגור - אין בדיקה בשבת עצמה).
-  // זו לא בדיקה אוטומטית של "האם באמת נשלח" (אין לזה מקור נתונים ברפיד וואן) - רק תזכורת שמופיעה
-  // כשהוא בכלל עבד ביום הרלוונטי, כדי לא להטריד תזכורת מיותרת בימים שהוא לא עבד.
   const todayIdx = weekdayIndexOfIsoDate(today);
-  let talmorCheckDate = null;
-  let talmorWorkdayLabel = '';
-  if (todayIdx === 3) {
-    talmorCheckDate = yesterday; // שלישי
-    talmorWorkdayLabel = 'שלישי בערב';
-  } else if (todayIdx === 0) {
-    talmorCheckDate = israelDateParts(-2).iso; // שישי
-    talmorWorkdayLabel = 'שישי בבוקר';
-  }
-  let talmorWorked = false;
+
+  // כללי תזכורת "לוודא שהסיכומים נשלחו" - ליום שאחרי יום העבודה, לרופאים ספציפיים שביקש המשתמש.
+  // חשוב: אלה *לא* בדיקות אוטומטיות אמיתיות - אין ברפיד וואן שום נתון על "האם סיכום נשלח בפועל".
+  // כל מה שיש זה תזכורת שמופיעה למשרד ביום הנכון, ורק אם הרופא/ה באמת עבד/ה באותו יום (כדי לא
+  // להטריד בימים מיותרים) - המשרד עצמו מבצע את הבדיקה בפועל.
+  const SUMMARY_CHECK_RULES = [
+    // ד"ר עודד טלמור (1/9, לפי בקשת המשתמש): עובד שלישי ושישי בלבד.
+    { triggerWeekday: 3, checkDate: yesterday, workdayLabel: 'שלישי בערב', staffMatch: 'טלמור', staffLabel: 'ד"ר עודד טלמור' }, // רביעי - אתמול=שלישי
+    { triggerWeekday: 0, checkDate: israelDateParts(-2).iso, workdayLabel: 'שישי בבוקר', staffMatch: 'טלמור', staffLabel: 'ד"ר עודד טלמור' }, // ראשון - שישי (שבת סגור)
+    // ד"ר אורן טנא (5/9, לפי בקשת המשתמש): תזכורות בשלישי ובחמישי.
+    { triggerWeekday: 2, checkDate: yesterday, workdayLabel: 'שני', staffMatch: 'טנא', staffLabel: 'ד"ר אורן טנא' }, // שלישי - אתמול=שני
+    { triggerWeekday: 4, checkDate: yesterday, workdayLabel: 'רביעי', staffMatch: 'טנא', staffLabel: 'ד"ר אורן טנא' }, // חמישי - אתמול=רביעי
+  ];
+  const activeSummaryRules = SUMMARY_CHECK_RULES.filter((r) => r.triggerWeekday === todayIdx).map((r) => ({ ...r, worked: false }));
 
   // תזכורת מיזוג (5/9, לפי בקשת המשתמש): אם *מחר* יש פגישה (כל רופא/מטפל) שנמשכת אחרי 20:00 -
   // יש להוציא היום בבוקר תזכורת למשרד לדאוג למיזוג מראש (המשתמש ביקש לפחות 24 שעות מראש, כלומר
@@ -433,8 +433,12 @@ function buildReport(appointments, { today, yesterday, dayPlus1, dayPlus2 }) {
       }
     }
 
-    if (talmorCheckDate && dateOnly === talmorCheckDate && !placeholder && staffName.includes('טלמור')) {
-      talmorWorked = true;
+    if (!placeholder) {
+      for (const rule of activeSummaryRules) {
+        if (dateOnly === rule.checkDate && staffName.includes(rule.staffMatch)) {
+          rule.worked = true;
+        }
+      }
     }
   }
 
@@ -449,7 +453,8 @@ function buildReport(appointments, { today, yesterday, dayPlus1, dayPlus2 }) {
     eveningBillingCheck,
     filteredPsychologicalCount,
     upcomingCounts,
-    talmorReminder: talmorCheckDate ? { checkDate: talmorCheckDate, workdayLabel: talmorWorkdayLabel, worked: talmorWorked } : null,
+    // רק הכללים שהתאריך שלהם עבד בפועל (worked=true) - אלה שצריך להציג בפועל בדוח.
+    summaryReminders: activeSummaryRules.filter((r) => r.worked).map((r) => ({ staffLabel: r.staffLabel, workdayLabel: r.workdayLabel })),
     amslamWorkingToday,
     tomorrowLateAppts,
     note: 'upcomingCounts היא ספירה גולמית של פגישות קיימות בלבד - לא בדיקת "חורים" אמיתית מול שעות עבודה מלאות של כל רופא. eveningBillingCheck כולל רק טיפולים פסיכיאטריים (לא פסיכולוגיים) - ראה filteredPsychologicalCount למספר שסוננו.',
@@ -541,9 +546,9 @@ function buildWhatsAppText(report, leadsText) {
     lines.push('');
     lines.push('🌱🚨 תזכורת חשובה - להשקות את העציצים!! 🚨🌱');
   }
-  if (report.talmorReminder && report.talmorReminder.worked) {
+  for (const rem of report.summaryReminders || []) {
     lines.push('');
-    lines.push(`📝 תזכורת - לוודא שנשלחו הסיכומים של ד"ר עודד טלמור (${report.talmorReminder.workdayLabel})`);
+    lines.push(`📝 תזכורת - לוודא שנשלחו הסיכומים של ${rem.staffLabel} (${rem.workdayLabel})`);
   }
   if (report.amslamWorkingToday) {
     lines.push('');
@@ -695,16 +700,17 @@ function describeTomorrowLateAppts(tomorrowLateAppts) {
 }
 
 function buildSpecialReminderRowsHtml(todayIdx, report) {
-  const { talmorReminder, amslamWorkingToday, tomorrowLateAppts } = report;
+  const { summaryReminders, amslamWorkingToday, tomorrowLateAppts } = report;
   const rows = [];
   if (todayIdx === 1 || todayIdx === 4) {
     rows.push('<div class="row"><span class="stripe danger"></span><div class="txt"><span class="name">💧 להשקות את העציצים!</span><span class="chip danger">היום</span></div></div>');
   }
-  // לפי בקשת המשתמש (1/9): רביעי - לוודא סיכומים משלישי בערב; ראשון - לוודא סיכומים משישי בבוקר -
-  // רק אם ד"ר טלמור בכלל עבד באותו יום (talmorReminder.worked).
-  if (talmorReminder && talmorReminder.worked) {
+  // לפי בקשת המשתמש (1/9, הורחב 5/9): רופאים ספציפיים שביקש המשתמש - תזכורת ביום שאחרי יום העבודה
+  // שלהם, לוודא שנשלחו הסיכומים. רק אם באמת עבדו באותו יום (rem.staffLabel/workdayLabel כבר מסונן
+  // ב-buildReport - summaryReminders מכיל רק כללים שבאמת "worked").
+  for (const rem of summaryReminders || []) {
     rows.push(
-      `<div class="row"><span class="stripe danger"></span><div class="txt"><span class="name">📝 לוודא שנשלחו הסיכומים של ד"ר עודד טלמור (${escapeHtml(talmorReminder.workdayLabel)})</span><span class="chip danger">היום</span></div></div>`
+      `<div class="row"><span class="stripe danger"></span><div class="txt"><span class="name">📝 לוודא שנשלחו הסיכומים של ${escapeHtml(rem.staffLabel)} (${escapeHtml(rem.workdayLabel)})</span><span class="chip danger">היום</span></div></div>`
     );
   }
   // לפי בקשת המשתמש (5/9): בכל בוקר שפרופ' אמסלם עובד - רשימת הפעולות הקבועות שלו.
