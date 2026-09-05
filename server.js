@@ -354,6 +354,15 @@ function buildReport(appointments, { today, yesterday, dayPlus1, dayPlus2 }) {
   }
   let talmorWorked = false;
 
+  // תזכורת מיזוג (5/9, לפי בקשת המשתמש): אם *מחר* יש פגישה (כל רופא/מטפל) שנמשכת אחרי 20:00 -
+  // יש להוציא היום בבוקר תזכורת למשרד לדאוג למיזוג מראש (המשתמש ביקש לפחות 24 שעות מראש, כלומר
+  // התזכורת מוצגת בדוח של היום עבור פגישה שתתקיים מחר בערב - לא בדיעבד).
+  const tomorrowLateAppts = [];
+
+  // תזכורת פרופ' אמסלם (5/9, לפי בקשת המשתמש): להתריע באותו הבוקר שהוא עובד (לא יום לפני/אחרי),
+  // עם רשימת הפעולות הקבועות (קישור זום, שאלונים, טפסי לקוחות, תזכור למטופלים).
+  let amslamWorkingToday = false;
+
   for (const appt of appointments) {
     if (appt.isDeleted) continue;
     // רפיד וואן מחזירה startDate/endDate ב-UTC - ממירים לשעון ישראל לפני כל שימוש בתאריך/שעה שלהם.
@@ -376,6 +385,7 @@ function buildReport(appointments, { today, yesterday, dayPlus1, dayPlus2 }) {
         service: serviceName,
         notes: appt.notes || '',
       });
+      if (staffName.includes('אמסלם')) amslamWorkingToday = true;
     }
 
     if (dateOnly === yesterday && !placeholder) {
@@ -411,6 +421,15 @@ function buildReport(appointments, { today, yesterday, dayPlus1, dayPlus2 }) {
       upcomingCounts[dateOnly][staffName] = (upcomingCounts[dateOnly][staffName] || 0) + 1;
     }
 
+    // תזכורת מיזוג: פגישה מחר שנמשכת אחרי 20:00 (השוואת מחרוזות "HH:MM" עובדת נכון פה כי שתי
+    // הצדדים תמיד באורך 5 תווים קבוע - למשל "20:30" > "20:00").
+    if (dateOnly === dayPlus1 && !placeholder) {
+      const endTimeStr = (endLocal || '').slice(11, 16);
+      if (endTimeStr && endTimeStr > '20:00') {
+        tomorrowLateAppts.push({ staffName, endTime: endTimeStr });
+      }
+    }
+
     if (talmorCheckDate && dateOnly === talmorCheckDate && !placeholder && staffName.includes('טלמור')) {
       talmorWorked = true;
     }
@@ -428,6 +447,8 @@ function buildReport(appointments, { today, yesterday, dayPlus1, dayPlus2 }) {
     filteredPsychologicalCount,
     upcomingCounts,
     talmorReminder: talmorCheckDate ? { checkDate: talmorCheckDate, workdayLabel: talmorWorkdayLabel, worked: talmorWorked } : null,
+    amslamWorkingToday,
+    tomorrowLateAppts,
     note: 'upcomingCounts היא ספירה גולמית של פגישות קיימות בלבד - לא בדיקת "חורים" אמיתית מול שעות עבודה מלאות של כל רופא. eveningBillingCheck כולל רק טיפולים פסיכיאטריים (לא פסיכולוגיים) - ראה filteredPsychologicalCount למספר שסוננו.',
   };
 }
@@ -517,6 +538,18 @@ function buildWhatsAppText(report, leadsText) {
   if (report.talmorReminder && report.talmorReminder.worked) {
     lines.push('');
     lines.push(`📝 תזכורת - לוודא שנשלחו הסיכומים של ד"ר עודד טלמור (${report.talmorReminder.workdayLabel})`);
+  }
+  if (report.amslamWorkingToday) {
+    lines.push('');
+    lines.push('🖥️ פרופ\' דורון אמסלם עובד היום - רשימת פעולות:');
+    lines.push('  - לשלוח שוב את קישור הזום.');
+    lines.push('  - לוודא שהשאלונים מולאו.');
+    lines.push('  - לוודא שכל טפסי הלקוחות במערכת מסודרים.');
+    lines.push('  - לתזכר את המטופלים בבוקר שיעלו בדיוק בזמן.');
+  }
+  if (report.tomorrowLateAppts && report.tomorrowLateAppts.length) {
+    lines.push('');
+    lines.push(`❄️ שימו לב - דאגתם למיזוג למחר בערב? (${describeTomorrowLateAppts(report.tomorrowLateAppts)})`);
   }
   lines.push('');
 
@@ -641,7 +674,15 @@ function buildBillingRowsHtml(report) {
   }
   return rows.join('\n');
 }
-function buildSpecialReminderRowsHtml(todayIdx, talmorReminder) {
+// עוזר: תיאור קצר וקומפקטי של רשימת פגישות מחר שנמשכות אחרי 20:00 (לתזכורת המיזוג) - לדוגמה
+// "דר שרון פורת (עד 20:30), דר אורן טנא (עד 21:00)". ממוין לפי שעת סיום, מהמאוחרת ביותר.
+function describeTomorrowLateAppts(tomorrowLateAppts) {
+  const sorted = [...tomorrowLateAppts].sort((a, b) => b.endTime.localeCompare(a.endTime));
+  return sorted.map((a) => `${a.staffName} (עד ${a.endTime})`).join(', ');
+}
+
+function buildSpecialReminderRowsHtml(todayIdx, report) {
+  const { talmorReminder, amslamWorkingToday, tomorrowLateAppts } = report;
   const rows = [];
   if (todayIdx === 1 || todayIdx === 4) {
     rows.push('<div class="row"><span class="stripe danger"></span><div class="txt"><span class="name">💧 להשקות את העציצים!</span><span class="chip danger">היום</span></div></div>');
@@ -651,6 +692,19 @@ function buildSpecialReminderRowsHtml(todayIdx, talmorReminder) {
   if (talmorReminder && talmorReminder.worked) {
     rows.push(
       `<div class="row"><span class="stripe danger"></span><div class="txt"><span class="name">📝 לוודא שנשלחו הסיכומים של ד"ר עודד טלמור (${escapeHtml(talmorReminder.workdayLabel)})</span><span class="chip danger">היום</span></div></div>`
+    );
+  }
+  // לפי בקשת המשתמש (5/9): בכל בוקר שפרופ' אמסלם עובד - רשימת הפעולות הקבועות שלו.
+  if (amslamWorkingToday) {
+    rows.push(
+      `<div class="row"><span class="stripe danger"></span><div class="txt"><span class="name">🖥️ פרופ' דורון אמסלם עובד היום - רשימת פעולות</span><span class="chip danger">היום</span><div class="sub">לשלוח שוב את קישור הזום · לוודא שהשאלונים מולאו · לוודא שכל טפסי הלקוחות במערכת מסודרים · לתזכר את המטופלים בבוקר שיעלו בדיוק בזמן</div></div></div>`
+    );
+  }
+  // לפי בקשת המשתמש (5/9): תזכורת מיזוג ליום העבודה הבא - מוצגת יום לפני (לפחות 24 שעות מראש),
+  // אם יש מחר פגישה (כל רופא/מטפל) שנמשכת אחרי 20:00.
+  if (tomorrowLateAppts && tomorrowLateAppts.length) {
+    rows.push(
+      `<div class="row"><span class="stripe danger"></span><div class="txt"><span class="name">❄️ שימו לב - דאגתם למיזוג למחר בערב?</span><span class="chip danger">מחר</span><div class="sub">${escapeHtml(describeTomorrowLateAppts(tomorrowLateAppts))}</div></div></div>`
     );
   }
   if (!rows.length) {
@@ -706,7 +760,7 @@ function renderReportHtml(report, leadsText) {
   html = fillPlaceholder(html, '{{LEADS_ROWS}}', buildLeadsRowsHtml(leadsText));
   html = fillPlaceholder(html, '{{YESTERDAY_LABEL}}', escapeHtml(heDateLabel(yesterday)));
   html = fillPlaceholder(html, '{{BILLING_ROWS}}', buildBillingRowsHtml(report));
-  html = fillPlaceholder(html, '{{SPECIAL_REMINDER_ROWS}}', buildSpecialReminderRowsHtml(todayIdx, report.talmorReminder));
+  html = fillPlaceholder(html, '{{SPECIAL_REMINDER_ROWS}}', buildSpecialReminderRowsHtml(todayIdx, report));
   html = fillPlaceholder(html, '{{TOMORROW_LINE}}', buildTomorrowLine(report)); // כבר escape-ד בפנים + כולל <br>, לא לעטוף שוב
   return html;
 }
